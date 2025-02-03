@@ -545,7 +545,7 @@ class PostProcessing(object):
 
     def plot_vertical_cross_section(self, quantity_function, p1, p2, num_horizontal_points=500, num_vertical_points=500, title='Cross-section', clabel='Color', center_range=False, save=None, contourlines=True, num_levels=None, figsize=(12,6), **kwargs):
         
-        scaling_vec = np.array([self.hydro.model_options['x_scaling'], self.hydro.model_options['y_scaling']])
+        scaling_vec = np.array([self.hydro.geometric_information['x_scaling'], self.hydro.geometric_information['y_scaling']])
         width = np.linalg.norm((p1-p2) * scaling_vec, 2) / 1e3
         s_range = np.linspace(width/2, -width/2, num_horizontal_points)
         x_range = np.linspace(p1[0], p2[0], num_horizontal_points)
