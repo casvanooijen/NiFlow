@@ -154,6 +154,11 @@ class PostProcessing(object):
                             hydro.alpha_solution[m][-q] * Hx / x_scaling + hydro.beta_solution[m][-q] * Hy / y_scaling for m in range(M)]
                 F[q] = [H * (ngsolve.grad(hydro.alpha_solution[m][q])[0] / x_scaling + ngsolve.grad(hydro.beta_solution[m][q])[1] / y_scaling) + \
                             hydro.alpha_solution[m][q] * Hx / x_scaling + hydro.beta_solution[m][q] * Hy / y_scaling for m in range(M)]
+                
+            self.w = lambda q, sigma : -sum([1/((m+0.5)*np.pi) * F[q][m] * hydro.vertical_basis.integrated_evaluation_function(sigma, m) for m in range(M)]) + \
+                                        sigma * self.u(q, sigma) * Hx / x_scaling + sigma * self.v(q, sigma) * Hy / y_scaling
+            self.w_timed = lambda t, sigma : sum([-sum([1/((m+0.5)*np.pi) * F[q][m] * hydro.vertical_basis.integrated_evaluation_function(sigma, m) for m in range(M)]) for q in range(-imax, imax)]) + \
+                                        sigma * self.u_timed(t, sigma) * Hx / x_scaling + sigma * self.v_timed(t, sigma) * Hy / y_scaling
         else:
             F[0] = [H * ((ngsolve.grad(hydro.alpha_solution[m][0])[0]+hydro.Q_solution[0]*hydro.riverine_forcing.normal_alpha[m]*river_interpolant_x) / x_scaling + ngsolve.grad(hydro.beta_solution[m][0])[1] / y_scaling) + \
                     (hydro.alpha_solution[m][0]+hydro.Q_solution[0]*hydro.riverine_forcing.normal_alpha[m]*river_interpolant) * Hx / x_scaling + hydro.beta_solution[m][0] * Hy / y_scaling for m in range(M)]
@@ -162,11 +167,11 @@ class PostProcessing(object):
                             (hydro.alpha_solution[m][-q]+hydro.Q_solution[-q]*hydro.riverine_forcing.normal_alpha[m]*river_interpolant) * Hx / x_scaling + hydro.beta_solution[m][-q] * Hy / y_scaling for m in range(M)]
                 F[q] = [H * ((ngsolve.grad(hydro.alpha_solution[m][q])[0]+hydro.Q_solution[q]*hydro.riverine_forcing.normal_alpha[m]*river_interpolant_x) / x_scaling + ngsolve.grad(hydro.beta_solution[m][q])[1] / y_scaling) + \
                             (hydro.alpha_solution[m][q]+hydro.Q_solution[q]*hydro.riverine_forcing.normal_alpha[m]*river_interpolant) * Hx / x_scaling + hydro.beta_solution[m][q] * Hy / y_scaling for m in range(M)]
-            
-        self.w = lambda q, sigma : -sum([1/((m+0.5)*np.pi) * F[q][m] * (np.sin((m+0.5)*np.pi*sigma) + minusonepower(m) * np.ones_like(sigma)) for m in range(M)]) + \
-                                   sigma * self.u(q, sigma) * Hx / x_scaling + sigma * self.v(q, sigma) * Hy / y_scaling
-        self.w_timed = lambda t, sigma : sum([-sum([1/((m+0.5)*np.pi) * F[q][m] * (np.sin((m+0.5)*np.pi*sigma) + minusonepower(m) * np.ones_like(sigma)) for m in range(M)]) for q in range(-imax, imax)]) + \
-                                         sigma * self.u_timed(t, sigma) * Hx / x_scaling + sigma * self.v_timed(t, sigma) * Hy / y_scaling
+        
+            self.w = lambda q, sigma : -sum([1/((m+0.5)*np.pi) * F[q][m] * hydro.vertical_basis.integrated_evaluation_function(sigma, m) for m in range(M)]) + \
+                                    sigma * self.u(q, sigma) * Hx / x_scaling + sigma * self.v(q, sigma) * Hy / y_scaling
+            self.w_timed = lambda t, sigma : sum([-sum([1/((m+0.5)*np.pi) * F[q][m] * hydro.vertical_basis.integrated_evaluation_function(sigma, m) for m in range(M)]) for q in range(-imax, imax)]) + \
+                                            sigma * self.u_timed(t, sigma) * Hx / x_scaling + sigma * self.v_timed(t, sigma) * Hy / y_scaling
 
 
         self.u_abs = lambda q, sigma : ngsolve.sqrt(self.u(q,sigma)*self.u(q,sigma)) if q == 0 else ngsolve.sqrt(self.u(q,sigma)*self.u(q,sigma)+self.u(-q,sigma)*self.u(-q,sigma)) 

@@ -108,7 +108,12 @@ def inner_prod(m, k):
     else:
         return 0
     
+def fint(z, n):
+    xn = (n+0.5) * np.pi
+    return (1/xn) * (np.sin(xn * z) + np.sin(xn))
+    
 eigbasis_constantAv = TruncationBasis(f, inner_prod, derivative_evaluation_function=fprime, second_derivative_evaluation_function=fdoubleprime)
+eigbasis_constantAv.integrated_evaluation_function = fint
 
 def minusonepower(num):
     if num % 2 == 0:
@@ -255,9 +260,14 @@ def eigbasis_partialslip(M: int, sf: float, Av: float, tol=1e-12, maxits=10):
 
     def inner_prod_ps(m, k):
         return 0.5 + np.sin(2*root_eigvals[k])/(4*root_eigvals[k]) if m == k else 0
+    
+
+    def fint_ps(z, n):
+        return (1/root_eigvals[n]) * (np.sin(root_eigvals[n] * z) + np.sin(root_eigvals[n]))
 
     
     basis = TruncationBasis(f_ps, inner_product=inner_prod_ps, derivative_evaluation_function=fprime_ps, second_derivative_evaluation_function=fdoubleprime_ps)
+    basis.integrated_evaluation_function = fint_ps
 
 
     def analytical_G1(m, n, k):
