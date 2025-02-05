@@ -48,7 +48,7 @@ def evaluate_vertical_structure_at_cross_section(mesh: ngsolve.Mesh, quantity_fu
     x_range = np.linspace(p1[0], p2[0], num_horizontal_points)
     y_range = np.linspace(p1[1], p2[1], num_horizontal_points)
 
-    Q = np.zeros((num_horizontal_points, num_vertical_points))
+    Q = np.zeros((num_vertical_points, num_horizontal_points))
     
     for i in range(num_vertical_points):
         Q[i, :] = evaluate_CF_range(quantity_function(sigma_range[i]), mesh, x_range, y_range)
@@ -560,10 +560,13 @@ class PostProcessing(object):
 
         depth = evaluate_CF_range(H, self.hydro.mesh, x_range, y_range)
 
-        s_grid = np.tile(s_range, (num_vertical_points, 1))
+        s_grid = -np.tile(s_range, (num_vertical_points, 1))
         z_grid = np.array([np.linspace(-depth[i], 0, num_vertical_points) for i in range(num_horizontal_points)]).T
 
-        Q = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, quantity_function, p1, p2, num_horizontal_points, num_vertical_points)
+        if isinstance(quantity_function, np.ndarray):
+            Q = quantity_function
+        else:
+            Q = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, quantity_function, p1, p2, num_horizontal_points, num_vertical_points)
 
         if center_range:
             maxamp = max(np.amax(Q), -np.amin(Q))
@@ -598,6 +601,40 @@ class PostProcessing(object):
 
         if save is not None:
             fig_crosssection.savefig(save)
+
+    
+    def get_w_cross_section(self, x, constituent=0, num_horizontal_points=500, num_vertical_points=500, dx=0.05):
+        """Currently only works for R=0."""
+        p1 = np.array([x, -0.5])
+        p2 = np.array([x, 0.5])
+        scaling_vec = np.array([self.hydro.geometric_information['x_scaling'], self.hydro.geometric_information['y_scaling']])
+
+        H = self.hydro.spatial_parameters['H'].cf
+        Hx = self.hydro.spatial_parameters['H'].gradient_cf[0]
+        Hy = self.hydro.spatial_parameters['H'].gradient_cf[1]
+
+        sig_grid = np.array([np.linspace(-1, 0, num_vertical_points) for i in range(num_horizontal_points)]).T
+        depth_grid = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: H, p1, p2, num_horizontal_points, num_vertical_points)
+        Hx_grid = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: Hx, p1, p2, num_horizontal_points, num_vertical_points)
+        Hy_grid = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: Hy, p1, p2, num_horizontal_points, num_vertical_points)
+
+        DUx_plus = (1/scaling_vec[0]) * evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.u(constituent, sig) * H, np.array([x+dx/2, -0.5]), np.array([x+dx/2, 0.5]), num_horizontal_points, num_vertical_points)
+        DUx_minus = (1/scaling_vec[0]) * evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.u(constituent, sig) * H, np.array([x-dx/2, -0.5]), np.array([x-dx/2, 0.5]), num_horizontal_points, num_vertical_points)
+        DUx = (DUx_plus - DUx_minus) / dx
+
+        DV = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.v(constituent, sig) * H, p1, p2, num_horizontal_points, num_vertical_points)
+        DVy = np.zeros_like(DV)
+        DVy[:, 1:-1] = (DV[:, 2:] - DV[:, :-2]) * num_horizontal_points / 2
+        DVy[:, 0] = (DV[:, 1] - DV[:, 0]) * num_horizontal_points
+        DVy[:, -1] = (DV[:, -1] - DV[:, -2]) * num_horizontal_points
+        DVy *= (1/scaling_vec[1])
+
+        Wtilde = -np.power(depth_grid, -1) / num_vertical_points * np.cumsum(DUx + DVy, axis=0)
+        W = depth_grid * Wtilde + (1/scaling_vec[0]) * (sig_grid * Hx_grid) * evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.u(constituent, sig), p1, p2, num_horizontal_points, num_vertical_points) + \
+            (1/scaling_vec[1]) * (sig_grid * Hy_grid) * evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.v(constituent, sig), p1, p2, num_horizontal_points, num_vertical_points)
+        
+        return W
+
 
 
     def plot_cross_section_circulation(self, p1: np.ndarray, p2: np.ndarray, num_horizontal_points: int, num_vertical_points: int, stride: int, phase: float = 0, constituent='all', flowrange: tuple=None):
