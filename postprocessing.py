@@ -274,8 +274,6 @@ class PostProcessing(object):
 
         if save:
             fig_mesh.savefig(save)
-
-        return fig_mesh, ax_mesh
     
 
     def plot_horizontal(self, quantity: ngsolve.CoefficientFunction, refinement_level: int=1, exclude_ramping_zone: bool=True, 
@@ -422,7 +420,6 @@ class PostProcessing(object):
             fig_colormap.savefig(save)
 
         plt.tight_layout()
-        return fig_colormap, ax_colormap
 
 
     def plot_horizontal_vectorfield(self, x_field, y_field, background_colorfield=None, num_x:int=40, num_y:int=40, arrow_color='white', title: str='Vector Field', clabel:str='Colour',
@@ -508,9 +505,7 @@ class PostProcessing(object):
         if save is not None:
             fig.savefig(save)
 
-        plt.tight_layout()
-        return fig, ax
-    
+        plt.tight_layout()   
 
 
     def plot_vertical_profile_at_point(self, p, num_vertical_points, constituent_index, **kwargs):
@@ -979,6 +974,28 @@ class PostProcessing(object):
         ax_crosscontour.fill_between(s_range, -np.amax(depth), -depth, color='silver')
 
         cbar = fig_crosscontour.colorbar(contourf)
+
+
+
+    def exchange_rate(self, num_vertical_points=100, quantity='u'):
+        """Computes the integral of max(u_subtidal, 0) over the entire domain. The unit of this quantity is m^4/s."""
+
+        x_scaling = self.hydro.geometric_information['x_scaling']
+        y_scaling = self.hydro.geometric_information['y_scaling']
+        H = self.hydro.spatial_parameters['H'].cf
+        R = self.hydro.spatial_parameters['R'].cf
+
+        sigma_range = np.linspace(-1, 0, num_vertical_points)
+        dsigma = sigma_range[1] - sigma_range[0]
+
+        if quantity == 'u':
+            maxU0 = lambda sigma: ngsolve.IfPos(self.u(0, sigma), self.u(0, sigma), 0)
+        elif quantity == 'v':
+            maxU0 = lambda sigma: ngsolve.IfPos(self.v(0, sigma), self.v(0, sigma), 0)
+
+        depth_integrated_maxU0 = dsigma * sum([maxU0(sigma_range[i]) for i in range(num_vertical_points)]) * (H+R)
+        return x_scaling * y_scaling * ngsolve.Integrate(depth_integrated_maxU0, self.hydro.mesh)
+
 
 
 
