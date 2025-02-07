@@ -179,10 +179,17 @@ def add_weak_form(a: ngsolve.BilinearForm, model_options: dict, numerical_inform
     if not only_linear:        
         if model_options['sea_boundary_treatment'] == 'exact':
             # terms l != 0
-            for l in range(1, imax + 1):
-                a += ngsolve.sqrt((gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant)**2 + (gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant)**2) * sea_boundary_testfunctions[-l] * dirac_delta_sea * ngsolve.dx  - seaward_amplitudes[l] * dirac_delta_sea * sea_boundary_testfunctions[-l] * ngsolve.dx# amplitude condition
-                a += ngsolve.atan2(-(gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant), (gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant)) * sea_boundary_testfunctions[l] * dirac_delta_sea * ngsolve.dx - seaward_phases[l - 1] * dirac_delta_sea * sea_boundary_testfunctions[l] * ngsolve.dx # phase condition, phases at l - 1 because there is no element corresponding to l = 0 in that list
-
+            for l in range(1, imax + 1): 
+                if seaward_amplitudes[l] != 0:
+                    a += ngsolve.sqrt((gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant)**2 + (gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant)**2) * sea_boundary_testfunctions[-l] * dirac_delta_sea * ngsolve.dx  - seaward_amplitudes[l] * dirac_delta_sea * sea_boundary_testfunctions[-l] * ngsolve.dx# amplitude condition
+                    a += ngsolve.atan2(-(gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant), (gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant)) * sea_boundary_testfunctions[l] * dirac_delta_sea * ngsolve.dx - seaward_phases[l - 1] * dirac_delta_sea * sea_boundary_testfunctions[l] * ngsolve.dx # phase condition, phases at l - 1 because there is no element corresponding to l = 0 in that list
+    
+    if model_options['sea_boundary_treatment'] == 'exact':
+        for l in range(1, imax + 1):
+            if seaward_amplitudes[l] == 0:
+                a += (gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant) * sea_boundary_testfunctions * dirac_delta_sea * ngsolve.dx
+                a += (gamma_trialfunctions[l] + A_trialfunctions[l]*sea_interpolant) * sea_boundary_testfunctions * dirac_delta_sea * ngsolve.dx
+    
     # INTERPRETABLE RIVERINE BOUNDARY CONDITION =====================================================================================================
 
     # dirac_delta_river = ngsolve.IfPos((ngsolve.x - dirac_delta_width/2 - (1 - geometric_information['L_R_river'])) * ((1 - geometric_information['L_R_river']) - dirac_delta_width/2 - ngsolve.x),
@@ -457,7 +464,7 @@ def add_weak_form(a: ngsolve.BilinearForm, model_options: dict, numerical_inform
 def add_linearised_nonlinear_terms(a: ngsolve.BilinearForm, model_options: dict, numerical_information: dict, geometric_information: dict, constant_parameters, spatial_parameters,
                                    alpha_trialfunctions, alpha0, beta_trialfunctions, beta0, gamma_trialfunctions,
                                    gamma0, umom_testfunctions, vmom_testfunctions, DIC_testfunctions, 
-                                   vertical_basis: TruncationBasis, time_basis: TruncationBasis, normalalpha, normalalpha_y=None, A_trialfunctions=None, A0=None,
+                                   vertical_basis: TruncationBasis, time_basis: TruncationBasis, seaward_amplitudes, normalalpha, normalalpha_y=None, A_trialfunctions=None, A0=None,
                                    sea_boundary_testfunctions=None, Q_trialfunctions=None, Q0=None):
     """Adds the (Fréchet/Gâteaux) linearisation of the nonlinear terms (advection and/or surface_in_sigma) to a bilinear form.
 
@@ -604,13 +611,14 @@ def add_linearised_nonlinear_terms(a: ngsolve.BilinearForm, model_options: dict,
     if model_options['sea_boundary_treatment'] == 'exact':
         # terms l != 0
         for l in range(1, imax + 1):
-            a += dirac_delta_sea / ngsolve.sqrt((gamma0[-l]+A0[-l]*sea_interpolant)**2 + (gamma0[l]+A0[l]*sea_interpolant)**2) * \
-                ((gamma0[l]+A0[l]*sea_interpolant)*(gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant) + (gamma0[-l]+A0[-l]*sea_interpolant)*(gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant)) * sea_boundary_testfunctions[-l] * ngsolve.dx
+            if seaward_amplitudes[l] != 0:
+                a += dirac_delta_sea / ngsolve.sqrt((gamma0[-l]+A0[-l]*sea_interpolant)**2 + (gamma0[l]+A0[l]*sea_interpolant)**2) * \
+                    ((gamma0[l]+A0[l]*sea_interpolant)*(gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant) + (gamma0[-l]+A0[-l]*sea_interpolant)*(gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant)) * sea_boundary_testfunctions[-l] * ngsolve.dx
 
-            a += dirac_delta_sea * (
-                -(gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant) / ((gamma0[l]+A0[l]*sea_interpolant) * (1 + ((gamma0[-l]+A0[-l]*sea_interpolant)**2 / (gamma0[l]+A0[l]*sea_interpolant)**2))) + \
-                (gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant) * (gamma0[-l]+A0[-l]*sea_interpolant) / ((gamma0[-l]+A0[-l]*sea_interpolant)**2 + (gamma0[l]+A0[l]*sea_interpolant)**2)
-            ) * sea_boundary_testfunctions[l] * ngsolve.dx
+                a += dirac_delta_sea * (
+                    -(gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant) / ((gamma0[l]+A0[l]*sea_interpolant) * (1 + ((gamma0[-l]+A0[-l]*sea_interpolant)**2 / (gamma0[l]+A0[l]*sea_interpolant)**2))) + \
+                    (gamma_trialfunctions[l]+A_trialfunctions[l]*sea_interpolant) * (gamma0[-l]+A0[-l]*sea_interpolant) / ((gamma0[-l]+A0[-l]*sea_interpolant)**2 + (gamma0[l]+A0[l]*sea_interpolant)**2)
+                ) * sea_boundary_testfunctions[l] * ngsolve.dx
 
     ## MOMENTUM EQUATIONS #######################################################################
     for p in range(M):

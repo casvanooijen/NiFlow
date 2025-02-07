@@ -175,7 +175,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                                                          hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                          hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                          hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                         hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
+                                                                         hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
                                                                          A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions,
                                                                          Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
                             else:
@@ -183,21 +183,21 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                                                          hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                          hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                          hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                         hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
+                                                                         hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
                                                                          A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions)
                         elif hydro.model_options['river_boundary_treatment'] == 'exact':
                             weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
                                                                      hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                      hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                      hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                     hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
+                                                                     hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
                                                                      Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
                         else:
                             weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
                                                                      hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                      hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                      hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                     hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha)
+                                                                     hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha)
 
             else:
                 a = ngsolve.BilinearForm(hydro.femspace)
@@ -234,7 +234,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                                                         hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                         hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                         hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                        hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
+                                                                        hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
                                                                         A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions,
                                                                         Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
                         else:
@@ -242,21 +242,21 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                                                         hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                         hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                         hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                        hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
+                                                                        hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
                                                                         A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions)
                     elif hydro.model_options['river_boundary_treatment'] == 'exact':
                         weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
                                                                     hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                     hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                     hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                    hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
+                                                                    hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
                                                                     Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
                     else:
                         weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
                                                                     hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
                                                                     hydro.gamma_trialfunctions, hydro.gamma_solution,
                                                                     hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                    hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha)
+                                                                    hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha)
             forms_time = timeit.default_timer() - forms_start
             if print_log:
                 print(f"    Weak form construction took {np.round(forms_time, 3)} seconds")
