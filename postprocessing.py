@@ -423,7 +423,7 @@ class PostProcessing(object):
 
 
     def plot_horizontal_vectorfield(self, x_field, y_field, background_colorfield=None, num_x:int=40, num_y:int=40, arrow_color='white', title: str='Vector Field', clabel:str='Colour',
-                                    save: str=None, exclude_ramping_zone: bool=True, center_range:bool=False, **kwargs):
+                                    save: str=None, exclude_ramping_zone: bool=True, center_range:bool=False, figsize=(7,4), **kwargs):
         """
         Plots a vector field, where the transparency of the arrows denote the magnitude of the vector. A background colour field can also be provided.
         Works only for rectangular domains.
@@ -446,14 +446,14 @@ class PostProcessing(object):
         """
 
         if exclude_ramping_zone:
-            xquiv = np.linspace(0, self.hydro.geometric_information['riverine_boundary_x'], num_x) # This is a temporary solution; we assume now that if a structured grid is used, then the (scaled) domain is a unit square
-            xbackground = np.linspace(0, self.hydro.geometric_information['riverine_boundary_x'], 500) # This is a temporary solution; we assume now that if a structured grid is used, then the (scaled) domain is a unit square
+            xquiv = np.linspace(0, self.hydro.geometric_information['riverine_boundary_x'] / self.hydro.geometric_information['x_scaling'], num_x) # This is a temporary solution; we assume now that if a structured grid is used, then the (scaled) domain is a unit square
+            xbackground = np.linspace(0, self.hydro.geometric_information['riverine_boundary_x'] / self.hydro.geometric_information['x_scaling'], 500) # This is a temporary solution; we assume now that if a structured grid is used, then the (scaled) domain is a unit square
         else:
-            xquiv = np.linspace(-self.hydro.geometric_information['L_BL_sea']-self.hydro.geometric_information['L_R_sea']-self.hydro.geometric_information['L_RA_sea'],
-                            self.hydro.geometric_information['riverine_boundary_x']+self.hydro.geometric_information['L_RA_river']+self.hydro.geometric_information['L_R_river'] + self.hydro.geometric_information['L_BL_river'],
+            xquiv = np.linspace(-(self.hydro.geometric_information['L_BL_sea']-self.hydro.geometric_information['L_R_sea']-self.hydro.geometric_information['L_RA_sea']) / self.hydro.geometric_information['x_scaling'],
+                            (self.hydro.geometric_information['riverine_boundary_x']+self.hydro.geometric_information['L_RA_river']+self.hydro.geometric_information['L_R_river'] + self.hydro.geometric_information['L_BL_river'])/self.hydro.geometric_information['x_scaling'],
                             num_x)
-            xbackground = np.linspace(-self.hydro.geometric_information['L_BL_sea']-self.hydro.geometric_information['L_R_sea']-self.hydro.geometric_information['L_RA_sea'],
-                            self.hydro.geometric_information['riverine_boundary_x']+self.hydro.geometric_information['L_RA_river']+self.hydro.geometric_information['L_R_river'] + self.hydro.geometric_information['L_BL_river'],
+            xbackground = np.linspace(-(self.hydro.geometric_information['L_BL_sea']-self.hydro.geometric_information['L_R_sea']-self.hydro.geometric_information['L_RA_sea']) / self.hydro.geometric_information['x_scaling'],
+                            (self.hydro.geometric_information['riverine_boundary_x']+self.hydro.geometric_information['L_RA_river']+self.hydro.geometric_information['L_R_river'] + self.hydro.geometric_information['L_BL_river']) / self.hydro.geometric_information['x_scaling'],
                             500)
         yquiv = np.linspace(-0.5, 0.5, num_y)
         ybackground = np.linspace(-0.5, 0.5, 500)
@@ -466,11 +466,12 @@ class PostProcessing(object):
         for i in range(Xquiv.shape[1]):
             Xquiv[:, i] = evaluate_CF_range(x_field, self.hydro.mesh, xquiv, yquiv[i] * np.ones_like(xquiv))
             Yquiv[:, i] = evaluate_CF_range(y_field, self.hydro.mesh, xquiv, yquiv[i] * np.ones_like(xquiv))
+
+        fig, ax = plt.subplots(figsize=figsize)
+
         if background_colorfield is not None:
             for i in range(Xbackground.shape[1]):
                 C[:, i] = evaluate_CF_range(background_colorfield, self.hydro.mesh, xbackground, ybackground[i] * np.ones_like(xbackground))
-
-            fig, ax = plt.subplots()
 
             if center_range:
                 maxamp = np.amax(np.absolute(C))
@@ -481,11 +482,12 @@ class PostProcessing(object):
             cbar = fig.colorbar(background)
             cbar.ax.set_ylabel(clabel)
 
+        visual_norms = np.sqrt((Xquiv/self.hydro.geometric_information['x_scaling'])**2 + (Yquiv/self.hydro.geometric_information['y_scaling'])**2)
         norms = np.sqrt(Xquiv**2 + Yquiv**2)
 
-        arrows = ax.quiver(X, Y, Xquiv/norms, Yquiv/norms, color=arrow_color, pivot='mid', alpha=norms)
+        arrows = ax.quiver(X, Y, (Xquiv/self.hydro.geometric_information['x_scaling'])/visual_norms, (Yquiv/self.hydro.geometric_information['y_scaling'])/visual_norms, color=arrow_color, pivot='mid', alpha=norms / np.amax(norms))
 
-        ax.set_title(title + f'\nMaximum magnitude of arrows: {np.amax(norms)}')
+        ax.set_title(title + f'\nMaximum magnitude of arrows: {np.round(np.amax(norms), 8)}')
         
         if exclude_ramping_zone:
             x_ticks = list(np.linspace(0, 1, 11)) # Also a temporary solution; more domain types and compatibility with these functions will be added in the future
@@ -505,7 +507,13 @@ class PostProcessing(object):
         if save is not None:
             fig.savefig(save)
 
-        plt.tight_layout()   
+        plt.tight_layout() 
+
+
+    def animate_horizontal_vectorfield(self, x_field, y_field, constituent, savename:str, num_x:int=40, num_y:int=40, arrow_color='k', title='Vector Field',
+                                       exclude_ramping_zone: bool=True, figsize=(7,4), **kwargs):
+        
+        pass
 
 
     def plot_vertical_profile_at_point(self, p, num_vertical_points, constituent_index, **kwargs):
@@ -599,7 +607,7 @@ class PostProcessing(object):
 
     
     def get_w_cross_section(self, x, constituent=0, num_horizontal_points=500, num_vertical_points=500, dx=0.05):
-        """Currently only works for R=0."""
+        """Currently only works for R=0. And we need the fact that free surface effects are not yet taken into account (so continuity is a linear equation)."""
         p1 = np.array([x, -0.5])
         p2 = np.array([x, 0.5])
         scaling_vec = np.array([self.hydro.geometric_information['x_scaling'], self.hydro.geometric_information['y_scaling']])
@@ -632,13 +640,15 @@ class PostProcessing(object):
 
 
 
-    def plot_cross_section_circulation(self, p1: np.ndarray, p2: np.ndarray, num_horizontal_points: int, num_vertical_points: int, stride: int, phase: float = 0, constituent='all', flowrange: tuple=None):
+    def plot_cross_section_circulation(self, x, stride: int, num_horizontal_points: int = 500, num_vertical_points: int = 500, phase: float = 0, constituent='all', flowrange: tuple=None, figsize=(7,4), spacing='equal'):
+        p1 = np.array([x, -0.5])
+        p2 = np.array([x, 0.5])
         width = np.linalg.norm(p1-p2, 2)
         s_range = np.linspace(-width/2, width/2, num_horizontal_points)
         x_range = np.linspace(p1[0], p2[0], num_horizontal_points)
         y_range = np.linspace(p1[1], p2[1], num_horizontal_points)
 
-        H = self.hydro.spatial_physical_parameters['H'].cf
+        H = self.hydro.spatial_parameters['H'].cf
 
         depth = evaluate_CF_range(H, self.hydro.mesh, x_range, y_range)
 
@@ -654,42 +664,74 @@ class PostProcessing(object):
                                                              num_horizontal_points, num_vertical_points)
             V = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.v(constituent, sig) * self.hydro.time_basis.evaluation_function(phase / self.hydro.constant_physical_parameters['sigma'], constituent), p1, p2,
                                                              num_horizontal_points, num_vertical_points)
-            W = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.w(constituent, sig) * self.hydro.time_basis.evaluation_function(phase / self.hydro.constant_physical_parameters['sigma'], constituent), p1, p2,
-                                                             num_horizontal_points, num_vertical_points)
+            W = self.get_w_cross_section(x, constituent=constituent, dx=0.01) * self.hydro.time_basis.evaluation_function(phase, constituent)
         else:
-            Q = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.u(constituent, sig) * self.hydro.time_basis.evaluation_function(phase / self.hydro.constant_physical_parameters['sigma'], constituent) + \
-                                                             self.u(-constituent, sig) * self.hydro.time_basis.evaluation_function(phase/self.hydro.constant_physical_parameters['sigma'], -constituent), p1, p2,
+            Q = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.u(constituent, sig) * self.hydro.time_basis.evaluation_function(phase, constituent) + \
+                                                             self.u(-constituent, sig) * self.hydro.time_basis.evaluation_function(phase, -constituent), p1, p2,
                                                              num_horizontal_points, num_vertical_points)
-            V = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.v(constituent, sig) * self.hydro.time_basis.evaluation_function(phase / self.hydro.constant_physical_parameters['sigma'], constituent) + \
-                                                             self.v(-constituent, sig) * self.hydro.time_basis.evaluation_function(phase/self.hydro.constant_physical_parameters['sigma'], -constituent), p1, p2,
+            V = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.v(constituent, sig) * self.hydro.time_basis.evaluation_function(phase, constituent) + \
+                                                             self.v(-constituent, sig) * self.hydro.time_basis.evaluation_function(phase, -constituent), p1, p2,
                                                              num_horizontal_points, num_vertical_points)
-            W = evaluate_vertical_structure_at_cross_section(self.hydro.mesh, lambda sig: self.w(constituent, sig) * self.hydro.time_basis.evaluation_function(phase / self.hydro.constant_physical_parameters['sigma'], constituent) + \
-                                                             self.w(-constituent, sig) * self.hydro.time_basis.evaluation_function(phase/self.hydro.constant_physical_parameters['sigma'], -constituent), p1, p2,
-                                                             num_horizontal_points, num_vertical_points)
+            W = self.get_w_cross_section(x, constituent=constituent, dx=0.01) * self.hydro.time_basis.evaluation_function(phase, constituent) + self.get_w_cross_section(x, constituent=-constituent, dx=0.01) * self.hydro.time_basis.evaluation_function(phase, -constituent)
+
         
         if flowrange is None:
             maxamp = max(np.amax(Q), -np.amin(Q))
 
+        sig_range = np.linspace(-1, 0, num_vertical_points)
+        num_arrows_z = sig_range[::stride].shape[0]
+        zquiv_grid = np.array([np.linspace(-np.amax(depth), 0, num_arrows_z) for i in range(num_horizontal_points // stride + 1)]).T
+        squiv_grid = s_grid[::stride, ::stride]
+        print(squiv_grid.shape, zquiv_grid.shape)
 
-        fig_crosssection, ax_crosssection = plt.subplots()
+        Vquiv = np.zeros_like(zquiv_grid)
+        Wquiv = np.zeros_like(zquiv_grid)
+        mask = np.zeros_like(zquiv_grid)
+        
+
+        for y_index in range(num_horizontal_points // stride + 1):
+            local_depth = evaluate_CF_point(H, self.hydro.mesh, x, squiv_grid[0, y_index])
+            for z_index in range(num_vertical_points // stride):
+                if zquiv_grid[z_index, y_index] > -local_depth:
+                    mask[z_index, y_index] = 1
+                    sig_value = zquiv_grid[z_index, y_index] / local_depth
+                    corresponding_sig_index = np.argmin(np.absolute(sig_range - np.ones_like(sig_range) * sig_value))
+                    if sig_value >= sig_range[corresponding_sig_index]: # interpolation between sig_range[corresponding_sig_index] and sig_range[corresponding_sig_index + 1]
+                        Vquiv[z_index, y_index] = V[corresponding_sig_index, y_index * stride] * (sig_range[corresponding_sig_index + 1] - sig_value) + V[corresponding_sig_index + 1, y_index * stride] * (sig_value - sig_range[corresponding_sig_index])
+                        Vquiv[z_index, y_index] /= sig_range[corresponding_sig_index + 1] - sig_range[corresponding_sig_index]
+                        Wquiv[z_index, y_index] = W[corresponding_sig_index, y_index * stride] * (sig_range[corresponding_sig_index + 1] - sig_value) + W[corresponding_sig_index + 1, y_index * stride] * (sig_value - sig_range[corresponding_sig_index])
+                        Wquiv[z_index, y_index] /= sig_range[corresponding_sig_index + 1] - sig_range[corresponding_sig_index]
+                    else:
+                        Vquiv[z_index, y_index] = V[corresponding_sig_index - 1, y_index * stride] * (sig_range[corresponding_sig_index] - sig_value) + V[corresponding_sig_index, y_index * stride] * (sig_value - sig_range[corresponding_sig_index - 1])
+                        Vquiv[z_index, y_index] /= sig_range[corresponding_sig_index] - sig_range[corresponding_sig_index - 1]
+                        Wquiv[z_index, y_index] = W[corresponding_sig_index - 1, y_index * stride] * (sig_range[corresponding_sig_index] - sig_value) + W[corresponding_sig_index, y_index * stride] * (sig_value - sig_range[corresponding_sig_index - 1])
+                        Wquiv[z_index, y_index] /= sig_range[corresponding_sig_index] - sig_range[corresponding_sig_index - 1]
+            
+        fig_crosssection, ax_crosssection = plt.subplots(figsize=figsize)
         if flowrange is None:
-            color_crosssection = ax_crosssection.pcolormesh(s_grid, z_grid, Q, vmin=-maxamp, vmax=maxamp, cmap='bwr')
+            color_crosssection = ax_crosssection.pcolormesh(s_grid, z_grid, Q, vmin=-maxamp, vmax=maxamp, cmap='RdBu')
         cbar_crosssection = plt.colorbar(color_crosssection)
         cbar_crosssection.ax.set_ylabel('Longitudinal velocity [m/s]')
 
         ax_crosssection.plot(s_range, -depth, linewidth=1, color='k', zorder=3)
         ax_crosssection.fill_between(s_range, -np.amax(depth), -depth, color='silver')
-
         
+        if spacing == 'sigma':
+            visual_norms = np.sqrt((V[::stride,::stride] / (width*self.hydro.geometric_information['y_scaling']))**2 + (W[::stride,::stride] / np.amax(depth))**2) # y-dimension in km
+            physical_norms = np.sqrt((V[::stride,::stride])**2 + (W[::stride,::stride])**2)
+            quiv = ax_crosssection.quiver(s_grid[::stride,::stride], z_grid[::stride,::stride], (V[::stride,::stride] / (width*self.hydro.geometric_information['y_scaling'])) / visual_norms, (W[::stride,::stride] / np.amax(depth)) / visual_norms, color='k', alpha=physical_norms/np.amax(physical_norms))
+        elif spacing == 'equal':
+            visual_norms = np.sqrt((Vquiv / (width*self.hydro.geometric_information['y_scaling']))**2 + (Wquiv / np.amax(depth))**2) # y-dimension in km
+            physical_norms = np.sqrt((Vquiv)**2 + (Wquiv)**2)
+            quiv = ax_crosssection.quiver(squiv_grid, zquiv_grid, (Vquiv / (width*self.hydro.geometric_information['y_scaling'])) / visual_norms, (Wquiv / np.amax(depth)) / visual_norms, color='k', alpha=physical_norms/np.amax(physical_norms))
 
-        visual_norms = np.sqrt((V[::stride,::stride] / width)**2 + (W[::stride,::stride] / np.amax(depth))**2) # norm of the vector that we plot
-        physical_norms = np.sqrt((V[::stride,::stride])**2 + (W[::stride,::stride])**2)
+        xticks = list(np.linspace(-0.5, 0.5, 5))
+        ax_crosssection.set_xticks(xticks)
+        ax_crosssection.set_xticklabels(list(np.linspace(-0.5, 0.5, 5) * self.hydro.geometric_information['y_scaling'] / 1000))
 
-        # ax_crosssection.quiver(s_grid[::stride,::stride], z_grid[::stride,::stride], V[::stride,::stride] / width / 10, W[::stride,::stride] / np.amax(depth) / 10, color='k')
-        quiv = ax_crosssection.quiver(s_grid[::stride,::stride], z_grid[::stride,::stride], V[::stride,::stride] / (width*visual_norms), W[::stride,::stride] / (np.amax(depth)*visual_norms), color='k', alpha= physical_norms / np.amax(physical_norms))
-
-
-        ax_crosssection.set_title(f'Lateral flow at t = {phase}' + r'$\sigma^{-1}$' f' s\nMaximum lateral velocity = {np.round(np.amax(physical_norms),5)}')
+        ax_crosssection.set_xlabel('Distance along cross-section [km]')
+        ax_crosssection.set_ylabel('-Depth [m]')
+        ax_crosssection.set_title(f'Lateral flow at t = {phase}' + r'$\sigma^{-1}$' f' s\nMaximum lateral velocity = {np.round(np.amax(physical_norms),8)}')
 
 
     def plot_cross_section_residual_forcing_mechanisms(self, p1: np.ndarray, p2: np.ndarray, num_horizontal_points, num_vertical_points, figsize=(12,6), cmap='RdBu', savename=None, component='u', **kwargs):
