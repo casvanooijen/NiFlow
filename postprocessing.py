@@ -682,7 +682,6 @@ class PostProcessing(object):
         num_arrows_z = sig_range[::stride].shape[0]
         zquiv_grid = np.array([np.linspace(-np.amax(depth), 0, num_arrows_z) for i in range(num_horizontal_points // stride + 1)]).T
         squiv_grid = s_grid[::stride, ::stride]
-        print(squiv_grid.shape, zquiv_grid.shape)
 
         Vquiv = np.zeros_like(zquiv_grid)
         Wquiv = np.zeros_like(zquiv_grid)
