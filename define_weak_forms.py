@@ -187,8 +187,8 @@ def add_weak_form(a: ngsolve.BilinearForm, model_options: dict, numerical_inform
     if model_options['sea_boundary_treatment'] == 'exact':
         for l in range(1, imax + 1):
             if seaward_amplitudes[l] == 0:
-                a += (gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant) * sea_boundary_testfunctions * dirac_delta_sea * ngsolve.dx
-                a += (gamma_trialfunctions[l] + A_trialfunctions[l]*sea_interpolant) * sea_boundary_testfunctions * dirac_delta_sea * ngsolve.dx
+                a += (gamma_trialfunctions[-l]+A_trialfunctions[-l]*sea_interpolant) * sea_boundary_testfunctions[-l] * dirac_delta_sea * ngsolve.dx
+                a += (gamma_trialfunctions[l] + A_trialfunctions[l]*sea_interpolant) * sea_boundary_testfunctions[l] * dirac_delta_sea * ngsolve.dx
     
     # INTERPRETABLE RIVERINE BOUNDARY CONDITION =====================================================================================================
 
