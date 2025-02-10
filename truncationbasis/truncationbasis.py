@@ -331,14 +331,6 @@ def harmonic_time_basis(sigma):
             return 0.5 * np.sqrt(2) * np.ones_like(t)
         elif q > 0:
             return np.cos(2*np.pi*sigma*q*t)
-        
-    def h_cf(q):
-        if q < 0:
-            return ngsolve.sin(2*ngsolve.pi*sigma*q*ngsolve.x)
-        elif q == 0:
-            return 0.5 * np.sqrt(2)
-        elif q > 0:
-            return ngsolve.cos(2*ngsolve.pi*sigma*q*ngsolve.x)
 
     def inner_prod_h(i, j):
             if i == j:
@@ -346,7 +338,7 @@ def harmonic_time_basis(sigma):
             else:
                 return 0
             
-    time_basis = TruncationBasis(h, h_cf, inner_prod_h)
+    time_basis = TruncationBasis(h, inner_prod_h)
 
     def analytical_H2(p, q):
         if p == -q:
