@@ -9,6 +9,7 @@ import ngsolve
 import scipy.special
 import scipy.sparse
 from scipy.sparse.linalg import spsolve
+from scipy.optimize import bisect
 
 import NiFlow.truncationbasis.integrationtools as integrationtools
 
@@ -82,6 +83,21 @@ class TruncationBasis(object):
 
     def add_analytical_tensors(self, tensor_dict):
         self.tensor_dict = tensor_dict
+
+
+    def project_Galerkin_orthogonal(self, n, func, lower_int_limit=-1, upper_int_limit=0, num_quadrature_points = 10, num_mesh_elements=30):
+        GLL_points = integrationtools.get_GLL_points(num_quadrature_points)
+        mesh_GLL_points = integrationtools.get_mesh_GLL_points(num_mesh_elements, GLL_points, lower_int_limit, upper_int_limit)
+
+        coefficients = []
+        for j in range(n):
+            coefficients.append(integrationtools.GLL_integrate_mesh(func(mesh_GLL_points) * self.evaluation_function(mesh_GLL_points, j) * self.weight_function(mesh_GLL_points),
+                                                                    GLL_points, xl=lower_int_limit, xr=upper_int_limit) / self.inner_product(j, j))
+
+        return coefficients
+
+
+
 
 
 ##################################
@@ -199,6 +215,14 @@ def analytical_G5(k): # int zf_k
 def G5_iszero(k):
     return False
 
+
+def analytical_G6(m, n, k):
+    xm = (m+0.5)*np.pi
+    xn = (n+0.5)*np.pi
+    xk = (k+0.5)*np.pi
+
+    return xn/4 * (1/(xm+xn+xk) + 1/(xm+xn-xk) - 1/(xm-xn+xk) - 1/(xm-xn-xk) - np.cos(xm+xn+xk)/(xm+xn+xk) - np.cos(xm+xn-xk)/(xm+xn-xk) + np.cos(xm-xn+xk)/(xm-xn+xk) + np.cos(xm-xn-xk))
+
 eigbasis_constantAv.add_analytical_tensors({'G1': analytical_G1,
                                             'G1_iszero': G1_iszero,
                                             'G2': analytical_G2,
@@ -208,11 +232,12 @@ eigbasis_constantAv.add_analytical_tensors({'G1': analytical_G1,
                                             'G4': analytical_G4,
                                             'G4_iszero': G4_iszero,
                                             'G5': analytical_G5,
-                                            'G5_iszero': G5_iszero})  
+                                            'G5_iszero': G5_iszero,
+                                            'G6': analytical_G6})  
 
 # 2: vertical basis corresponding to the partial-slip condition
 
-def eigbasis_partialslip(M: int, sf: float, Av: float, tol=1e-12, maxits=10):
+def eigbasis_partialslip(M: int, sf: float, Av: float, boundary_epsilon=1e-6, **kwargs):
 
     """Generates an eigenfunction basis corresponding to a no-stress surface condition and a partial-slip bed condition.
     
@@ -227,15 +252,28 @@ def eigbasis_partialslip(M: int, sf: float, Av: float, tol=1e-12, maxits=10):
     # Solve the equation xtan(x)=sf/Av to find the eigenvalues using algebraic Newton-Raphson applied to the function 1/tan(x)-x*(Av/sf), which has the same solutions, but delivers a more stable Newton algorithm
     # first starting guess at pi/4 (otherwise division by zero); then at n*pi
 
-    init_guess = np.array([np.pi / 4 + j * np.pi for j in range(M)])
-    stopcriterion_vals = np.power(np.tan(init_guess), -1) - Av*init_guess/sf
-    root_eigvals = init_guess[:]
+    # init_guess = np.array([np.pi / 4 + j * np.pi for j in range(M)])
+    # stopcriterion_vals = np.power(np.tan(init_guess), -1) - Av*init_guess/sf
+    # root_eigvals = init_guess[:]
 
-    for _ in range(maxits): # stopping criterion: residual/initial_guess < epsilon
-        root_eigvals += (sf*np.tan(root_eigvals) - Av*root_eigvals*np.tan(root_eigvals)*np.tan(root_eigvals)) / (sf + (sf+Av)*np.tan(root_eigvals)*np.tan(root_eigvals))
-        stopcriterion_vals = np.power(np.tan(root_eigvals), -1) - Av*root_eigvals/sf
-        if np.amax(np.absolute(stopcriterion_vals / init_guess)) < tol:
-            break
+    # for _ in range(maxits): # stopping criterion: residual/initial_guess < epsilon
+    #     root_eigvals += (sf*np.tan(root_eigvals) - Av*root_eigvals*np.tan(root_eigvals)*np.tan(root_eigvals)) / (sf + (sf+Av)*np.tan(root_eigvals)*np.tan(root_eigvals))
+    #     stopcriterion_vals = np.power(np.tan(root_eigvals), -1) - Av*root_eigvals/sf
+    #     if np.amax(np.absolute(stopcriterion_vals / init_guess)) < tol:
+    #         print("I reached tolerance")
+    #         break
+            
+    # Instead solve using bisection method in the intervals (0, pi/2), (pi/2, 3pi/2), (3pi/2, 5pi/2), ...
+
+    root_eigvals = np.zeros(M)
+
+    def eigenvalue_equation(x):
+        return x * np.tan(x) - sf/Av
+
+    root_eigvals[0] = bisect(eigenvalue_equation, 0, np.pi/2 - boundary_epsilon)
+    for i in range(M - 1):
+        root_eigvals[i + 1] = bisect(eigenvalue_equation, (2*i + 1) * np.pi / 2 + boundary_epsilon, (2*i+3) * np.pi/2 - boundary_epsilon)
+    
 
     def f_ps(z, n):
         try:
@@ -308,12 +346,32 @@ def eigbasis_partialslip(M: int, sf: float, Av: float, tol=1e-12, maxits=10):
     def analytical_G5(m):
         return -np.sin(root_eigvals[m]) / root_eigvals[m] + (1 - np.cos(root_eigvals[m])) / (root_eigvals[m]**2)
     
+    def analytical_G6(m, n, k):
+        xm = root_eigvals[m]
+        xn = root_eigvals[n]
+        xk = root_eigvals[k]
+        return xn/4 * (1/(xm+xn+xk) + 1/(xm+xn-xk) - 1/(xm-xn+xk) - 1/(xm-xn-xk) - np.cos(xm+xn+xk)/(xm+xn+xk) - np.cos(xm+xn-xk)/(xm+xn-xk) + np.cos(xm-xn+xk)/(xm-xn+xk) + np.cos(xm-xn-xk))
+    
+
+    def analytical_G7(m,p):
+        xm = root_eigvals[m]
+        xp = root_eigvals[p]
+        if m == p:
+            return (xp - np.cos(xp)*np.sin(xp)) / (4*xp)
+        else:
+            numerator = 2 * xm**2 * xp * np.cos(xm) * np.sin(xp)  +  xm**4  -  xm**2 * xp**2  -  (xm**3 + xm*xp**2) * np.sin(xm) * np.cos(xp)
+            denominator = (xm**2-xp**2)**2
+            return numerator / denominator 
+
+    
     tensordict_ps = {
         'G1': analytical_G1,
         'G2': analytical_G2,
         'G3': analytical_G3,
         'G4': analytical_G4,
-        'G5': analytical_G5
+        'G5': analytical_G5,
+        'G6': analytical_G6,
+        'G7': analytical_G7
     }
 
     basis.add_analytical_tensors(tensordict_ps)
@@ -328,7 +386,7 @@ def harmonic_time_basis(sigma):
         if q < 0:
             return np.sin(2*np.pi*sigma*q*t)
         elif q == 0:
-            return 0.5 * np.sqrt(2) * np.ones_like(t)
+            return 0.5 * np.sqrt(2) * np.ones_like(t) if isinstance(t, np.ndarray) else 0.5 * np.sqrt(2)
         elif q > 0:
             return np.cos(2*np.pi*sigma*q*t)
 
@@ -339,6 +397,16 @@ def harmonic_time_basis(sigma):
                 return 0
             
     time_basis = TruncationBasis(h, inner_prod_h)
+
+    def hprime(t, q):
+        if q < 0:
+            return 2*np.pi*sigma*q*np.cos(2*np.pi*sigma*q*t)
+        elif q == 0:
+            return 0 * t
+        elif q > 0:
+            return -2*np.pi*sigma*q*np.sin(2*np.pi*sigma*q*t)
+    
+    time_basis.derivative_evaluation_function = hprime
 
     def analytical_H2(p, q):
         if p == -q:
@@ -508,17 +576,50 @@ def harmonic_time_basis(sigma):
                 return True
         else:
             return True
+        
+
+    def H4(i: int, j: int, l: int):
+        return 2 * np.pi * j * analytical_H3(i, -j, l)
+        
+
+    def H5(i: int, j: int, k: int, l: int, nsteps=5000, n_GLL_points=10): # do this one numerically, because otherwise there would be 81 cases; I think this will be faster in that case.
+        GLL_points = integrationtools.get_GLL_points(n_GLL_points)
+        T = integrationtools.get_mesh_GLL_points(nsteps, GLL_points, 0, 1)
+        integrand = time_basis.evaluation_function(T, i) * time_basis.evaluation_function(T, j) * time_basis.evaluation_function(T, k) * time_basis.evaluation_function(T, l)
+        return integrationtools.GLL_integrate_mesh(integrand, GLL_points, 0, 1)
+
 
 
         
     time_basis.add_analytical_tensors({'H2': analytical_H2,
                                        'H2_iszero': H2_iszero,
                                        'H3': analytical_H3,
-                                       'H3_iszero': H3_iszero})
+                                       'H3_iszero': H3_iszero,
+                                       'H4': H4,
+                                       'H5': H5})
     
     return time_basis
 
 unit_harmonic_time_basis = harmonic_time_basis(1)
+
+def project_product_truncated_Fourier_series(num_coefficients, coefficients1, coefficients2, complex_fourier_series=False):
+    imax = max(coefficients1.keys())
+
+    new_coefficients = {}
+    for k in range(-num_coefficients, num_coefficients + 1):
+        H1 = unit_harmonic_time_basis.inner_product(k, k)
+        new_coefficients[k] = 1/H1 * sum(sum(unit_harmonic_time_basis.tensor_dict['H3'](i, j, k) *
+                                                coefficients1[i] * coefficients2[j] for i in range(-imax, imax + 1)) for j in range(-imax, imax + 1))
+    
+    if complex_fourier_series:
+        complex_coefficients = [new_coefficients[0]]
+        for k in range(1, num_coefficients + 1):
+            complex_coefficients.append(new_coefficients[k]-1j*new_coefficients[-k])
+        return complex_coefficients
+    
+    return new_coefficients
+
+    
 
 
 class Projection(object):
@@ -620,3 +721,13 @@ class Projection(object):
                 self.massmatrix[i, j] = self.basis.inner_product(i, j)
 
         return self.massmatrix # option to save it to another variable
+    
+
+
+    if __name__ == '__main__':
+
+        eigbasis = eigbasis_partialslip(10, 0.0003, 0.01/12)
+        eigbasis.plot(5)
+        
+            
+

@@ -3,27 +3,29 @@ import os
 import json
 import cloudpickle
 import ngsolve
+import timeit
+from contextlib import nullcontext
 
 import NiFlow.truncationbasis.truncationbasis as truncationbasis
 from NiFlow.geometry.create_geometry import parametric_geometry, RIVER, SEA, WALL, WALLUP, WALLDOWN, BOUNDARY_DICT
 from NiFlow.geometry.meshing import generate_mesh
 from NiFlow.geometry.geometries import *
-from NiFlow.spatial_parameter.boundary_fitted_coordinates import generate_bfc
-from NiFlow.spatial_parameter.spatial_parameter import SpatialParameter
 import NiFlow.define_weak_forms as weakforms
 from NiFlow.utils import *
+from NiFlow.linear_solver import *
 
 
 def select_model_options(bed_bc:str = 'no_slip', veddy_viscosity_assumption:str = 'constant',
                          advection_influence_matrix: np.ndarray = None, sea_boundary_treatment:str = 'exact',
-                         river_boundary_treatment:str = 'simple'):
+                         river_boundary_treatment:str = 'simple', surface_interaction_influence_matrix: np.ndarray = None,
+                         include_advection_surface_interactions:bool = True):
     
     """
     
     Returns a dictionary of all the available model options. Safer than manually creating this dictionary.
     
     Arguments: ('...'  means that there will possibly be future options added)
-        
+
         - bed_bc:                                   indicates what type of boundary condition is used at the river bed ('no_slip' or 'partial_slip');
         - veddy_viscosity_assumption:               structure of the vertical eddy viscosity parameter ('constant' or 'depth-scaled&constantprofile');
         - advection_influence_matrix (np.ndarray):  (imax+1) x (imax+1) - boolean matrix where element (i,j) indicates whether constituent i is influenced by constituent j through momentum advection (if possible);
@@ -35,6 +37,8 @@ def select_model_options(bed_bc:str = 'no_slip', veddy_viscosity_assumption:str 
         - river_boundary_treatment:                 indicates how the riverine boundary condition is handled: 'simple' means that the riverine boundary condition is just applied at the computational boundary;
                                                     'exact' means that the (linear) interpretable boundary condition is included in the model equations. If 'simple' is chosen, any ramping is performed on the inside of the interpretable
                                                     domain where the ramping zone is [L - L_R_river - L_BL_river, L - L_BL_river] and the boundary layer adjustment zone is [L - L_BL_river, L].
+        - surface_interaction_influence_matrix:     (imax + 1) x (imax + 1) - boolean matrix where entry (i, j) indicates whether constituent i is influenced by constituent j through non-linear surface interactions (if possible).
+        - include_advection_surface_interactions:   if True, then non-linear interaction between the surface and the advective forcing will be included.
         """
     
     if bed_bc == 'partial_slip' and veddy_viscosity_assumption == 'constant':
@@ -45,7 +49,9 @@ def select_model_options(bed_bc:str = 'no_slip', veddy_viscosity_assumption:str 
             'veddy_viscosity_assumption': veddy_viscosity_assumption,
             'advection_influence_matrix': advection_influence_matrix, # the validity of this matrix is checked when imax is know, i.e. when the hydrodynamics object is initialised
             'sea_boundary_treatment': sea_boundary_treatment,
-            'river_boundary_treatment': river_boundary_treatment
+            'river_boundary_treatment': river_boundary_treatment,
+            'surface_interaction_influence_matrix': surface_interaction_influence_matrix,
+            'include_advection_surface_interactions': include_advection_surface_interactions
         }
     
 
@@ -134,7 +140,7 @@ def set_numerical_information(M, imax, order, grid_size, mesh_generation_method,
 
 def set_constant_physical_parameters(f: float, Av: float, Ah: float, seaward_amplitudes: list, seaward_phases: list,
                                      river_discharge: float = 0., g: float = 9.81, sigma: float = 2 / 89428.32720,
-                                     sf: float=1000000., advection_epsilon: float=1.):
+                                     sf: float=1000000., advection_epsilon: float=1., surface_epsilon: float=1.):
     """Returns a dictionary of constant physical parameters for the model.
     
     Arguments:
@@ -152,6 +158,7 @@ def set_constant_physical_parameters(f: float, Av: float, Ah: float, seaward_amp
     - sigma: (non-angular) frequency of the principle tidal component (default 2 / 89428.32720 from Table 3.2 in Gerkema (2019)).
     - sf: partial-slip parameter; only used if the partial-slip boundary condition is selected.
     - advection_epsilon: non-physical parameter that is a factor in front of the advective terms, controlling their strength (default 1, which is the physical case). 
+    - surface_epsilon: non-physical parameter that is a factor in front of the non-linear surface interaction terms, controlling their strength (default 1, which is the physical case). 
     
     """
 
@@ -165,19 +172,16 @@ def set_constant_physical_parameters(f: float, Av: float, Ah: float, seaward_amp
         'g': g,
         'sigma': sigma,
         'sf': sf,
-        'advection_epsilon': advection_epsilon
+        'advection_epsilon': advection_epsilon,
+        'surface_epsilon': surface_epsilon
     }
 
     return params
 
 
-def set_spatial_physical_parameters(H, R, rho):
-    """Returns a dictionary of spatially varying parameters. These parameters must be defined as python functions in terms of the curvilinear
-    coordinates xi and eta, 'xi' being the along-channel coordinate running from 0 to 1 (this also includes the ramping zone), and 'eta' being
-    the cross-channel coordinate running from -0.5 to 0.5. The function must make use of sympy-functions to define the parameter. Please **do not** use outer scope variables in the definitions of these functions;
+def set_spatial_physical_parameters(H, R=ngsolve.CF(0), rho=ngsolve.CF(1)):
+    """Returns a dictionary of spatially varying parameters. These parameters must be defined as ngsolve CoefficientFunctions. Please **do not** use outer scope variables in the definitions of these functions;
     this will mess up the saving/loading of models through pickling. This can always be avoided by using function closures.
-
-    These functions are converted to ngsolve.CoefficientFunction-objects in the initialisation of the Hydrodynamics-object.
 
     Arguments: 
 
@@ -187,14 +191,28 @@ def set_spatial_physical_parameters(H, R, rho):
     
     """
 
-    param_function_handles = {
+    H.spacedim=2
+    R.spacedim=2
+    rho.spacedim=2
+
+    params = {
         'H': H,
         'R': R,
         'rho': rho
     }
-    return param_function_handles
+
+    return params
 
 
+def get_spatial_parameter_gradients(params, mesh):
+    param_gradients = {}
+    temp_fes = ngsolve.H1(mesh, order=6)
+    for name, param in params.items():
+        temp_gf = ngsolve.GridFunction(temp_fes)
+        temp_gf.Set(param)
+        param_gradients[name] = ngsolve.grad(temp_gf)
+
+    return param_gradients
 
 class Hydrodynamics(object):
 
@@ -222,10 +240,17 @@ class Hydrodynamics(object):
         if model_options['advection_influence_matrix'] is None:
             model_options['advection_influence_matrix'] = np.full((numerical_information['imax'] + 1, numerical_information['imax'] + 1), True)
 
+        if model_options['surface_interaction_influence_matrix'] is None:
+            model_options['surface_interaction_influence_matrix'] = np.full((numerical_information['imax'] + 1, numerical_information['imax'] + 1), True)
+
+        if np.any(model_options['surface_interaction_influence_matrix']) and model_options['veddy_viscosity_assumption'] == 'constant':
+            raise ValueError("Currently impossible to use constant eddy viscosity with non-linear surface interactions. Please use depth-scaled eddy viscosity instead.")
+
         self.model_options = model_options
         self.geometric_information = geometric_information
         self.numerical_information = numerical_information
         self.constant_physical_parameters = constant_physical_parameters
+        
 
         # MAKE THE GEOMETRY FROM GEOMETRIC_INFORMATION
 
@@ -270,17 +295,13 @@ class Hydrodynamics(object):
         elif model_options['bed_bc'] == 'partial_slip':
             self.vertical_basis = truncationbasis.eigbasis_partialslip(numerical_information['M'], constant_physical_parameters['sf'], constant_physical_parameters['Av'])
 
+        self._setup_fem_space()            
+        self._setup_TnT()
+
         # CONVERT SPATIAL PARAMETERS TO COEFFICIENTFUNCTIONS
 
-        self.spatial_parameters = {}
-        bfc = generate_bfc(self.mesh, numerical_information['order'], method='laplace')
-
-        self.spatial_parameters['H'] = SpatialParameter(spatial_physical_parameters['H'], bfc)
-        self.spatial_parameters['R'] = SpatialParameter(spatial_physical_parameters['R'], bfc)
-        self.spatial_parameters['rho'] = SpatialParameter(spatial_physical_parameters['rho'], bfc)
-
-        self.sympy_spatial_parameters = spatial_physical_parameters
-
+        self.spatial_parameters = spatial_physical_parameters
+        self.spatial_parameters_grad = get_spatial_parameter_gradients(spatial_physical_parameters, self.mesh)
         # SET BOUNDARY CONDITIONS
 
         self._set_seaward_boundary_condition()
@@ -288,10 +309,20 @@ class Hydrodynamics(object):
 
         # INITIALISE FINITE ELEMENT SPACE AND TEST-/TRIALFUNCTIONS
 
-        self._setup_fem_space()
-        self._setup_TnT()
+       
+
+        self.solution_gf = ngsolve.GridFunction(self.femspace)
+        self.restructure_solution()
 
         self.nfreedofs = count_free_dofs(self.femspace)
+
+        # these are only used in the child class DecomposedHydrodynamics and are defined here to prevent exceptions
+        self.as_forcing_list = []
+        self.forcing_alpha = None
+        self.forcing_beta = None
+        self.forcing_gamma = None
+        self.forcing_A = None
+        self.forcing_Q = None
 
 
     # Private methods
@@ -309,39 +340,58 @@ class Hydrodynamics(object):
 
 
     def _setup_fem_space(self):
+        
 
         # shorthands for long variable names
         M = self.numerical_information['M']
         imax = self.numerical_information['imax']
         
-        U = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[RIVER]}")  # make sure that zero-th order is not used for the free surface
-        V = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}")
+        self.U = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[RIVER]}")  # make sure that zero-th order is not used for the free surface
+        self.V = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}")
 
         # add interior bubble functions if MINI-elements are used
         if self.numerical_information['element_type'] == 'MINI':
-            U.SetOrder(ngsolve.TRIG, 3 if self.numerical_information['order'] == 1 else self.numerical_information['order'] + 1)
-            V.SetOrder(ngsolve.TRIG, 3 if self.numerical_information['order'] == 1 else self.numerical_information['order'] + 1)
+            self.U.SetOrder(ngsolve.TRIG, 3 if self.numerical_information['order'] == 1 else self.numerical_information['order'] + 1)
+            self.V.SetOrder(ngsolve.TRIG, 3 if self.numerical_information['order'] == 1 else self.numerical_information['order'] + 1)
 
-            U.Update()
-            V.Update()
+            self.U.Update()
+            self.V.Update()
+
+        
 
         # define Z-space with order one less than velocity space in case of Taylor-Hood elements or MINI (k>1) elements
         if ((self.numerical_information['element_type'] == 'taylor-hood') or (self.numerical_information['element_type'] == 'MINI')) and self.numerical_information['order'] > 1:
-            Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'] - 1, dirichlet=BOUNDARY_DICT[SEA])
+            self.Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'] - 1)
         else:
-            Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'], dirichlet=BOUNDARY_DICT[SEA])
+            self.Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'])
+
+        self.ndofs_alpha = self.U.ndof
+        self.ndofs_beta = self.V.ndof
+        self.ndofs_gamma = self.Z.ndof
+
+        self.nfreedofs_alpha = count_free_dofs(self.U)
+        self.nfreedofs_beta = count_free_dofs(self.V)
+        self.nfreedofs_gamma = count_free_dofs(self.Z)
+
+        self.ndofs_u = self.ndofs_alpha * M * (2 * imax + 1)
+        self.ndofs_v = self.ndofs_beta * M * (2 * imax + 1)
+        self.ndofs_z = self.ndofs_gamma * (2 * imax + 1)
+        
+        self.nfreedofs_u = self.nfreedofs_alpha * M * (2 * imax + 1)
+        self.nfreedofs_v = self.nfreedofs_beta * M * (2 * imax + 1)
+        self.nfreedofs_z = self.nfreedofs_gamma * (2 * imax + 1)
 
         if self.model_options['sea_boundary_treatment'] == 'exact' or self.model_options['river_boundary_treatment'] == 'exact': # take into account floating point errors
             scalarFESpace = ngsolve.NumberSpace(self.mesh)
         
-        list_of_spaces = [U for _ in range(M*(2*imax + 1))]
+        list_of_spaces = [self.U for _ in range(M*(2*imax + 1))]
         for _ in range(M*(2*imax + 1)): 
-            list_of_spaces.append(V)
+            list_of_spaces.append(self.V)
         for _ in range(2*imax + 1):
-            list_of_spaces.append(Z)
+            list_of_spaces.append(self.Z)
 
         if self.model_options['sea_boundary_treatment'] == 'exact' and self.model_options['river_boundary_treatment'] == 'exact': # if we treat the boundary on both sides
-            for _ in range(2 * (2 * imax + 1)):
+            for _ in range(2 * imax + 2): # only one dimension for scalar Q
                 list_of_spaces.append(scalarFESpace)
         elif self.model_options['sea_boundary_treatment'] != 'exact' and self.model_options['river_boundary_treatment'] != 'exact': # if we do not treat the boundaries
             pass
@@ -349,12 +399,13 @@ class Hydrodynamics(object):
             for _ in range(2 * imax + 1): # if we have ramping on only one side
                 list_of_spaces.append(scalarFESpace)
         elif self.model_options['sea_boundary_treatment'] != 'exact' and self.model_options['river_boundary_treatment'] == 'exact':
-            for _ in range(2 * imax + 1): # if we have ramping on only one side
-                list_of_spaces.append(scalarFESpace)
+            # for _ in range(2 * imax + 1): # if we have ramping on only one side
+            list_of_spaces.append(scalarFESpace) 
 
         X = ngsolve.FESpace(list_of_spaces)
         self.femspace = X
-    
+
+
 
     def _setup_TnT(self):
         """Sorts the ngsolve Trial and Test functions into intuitive dictionaries"""
@@ -430,12 +481,12 @@ class Hydrodynamics(object):
                 Q_trialfunctions[0] = trialtuple[2*M*num_time_components + 2*num_time_components]
                 river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + 2*num_time_components]
 
-                for i in range(1, imax + 1):
-                    Q_trialfunctions[-i] = trialtuple[2*M*num_time_components + 2*num_time_components + i]
-                    Q_trialfunctions[i] = trialtuple[2*M*num_time_components + 2*num_time_components + imax + i]
+                # for i in range(1, imax + 1):
+                #     Q_trialfunctions[-i] = trialtuple[2*M*num_time_components + 2*num_time_components + i]
+                #     Q_trialfunctions[i] = trialtuple[2*M*num_time_components + 2*num_time_components + imax + i]
 
-                    river_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + 2*num_time_components + i]
-                    river_boundary_testfunctions[i] = testtuple[2*M*num_time_components + 2*num_time_components + imax + i]
+                #     river_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + 2*num_time_components + i]
+                #     river_boundary_testfunctions[i] = testtuple[2*M*num_time_components + 2*num_time_components + imax + i]
 
                 self.Q_trialfunctions = Q_trialfunctions
                 self.river_boundary_testfunctions = river_boundary_testfunctions
@@ -444,15 +495,15 @@ class Hydrodynamics(object):
                 Q_trialfunctions = dict()
                 river_boundary_testfunctions = dict()
 
-                Q_trialfunctions[0] = trialtuple[2*M*num_time_components + 2*num_time_components]
-                river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + 2*num_time_components]
+                Q_trialfunctions[0] = trialtuple[2*M*num_time_components + num_time_components]
+                river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + num_time_components]
 
-                for i in range(1, imax + 1):
-                    Q_trialfunctions[-i] = trialtuple[2*M*num_time_components + 2*num_time_components + i]
-                    Q_trialfunctions[i] = trialtuple[2*M*num_time_components + 2*num_time_components + imax + i]
+                # for i in range(1, imax + 1):
+                #     Q_trialfunctions[-i] = trialtuple[2*M*num_time_components + num_time_components + i]
+                #     Q_trialfunctions[i] = trialtuple[2*M*num_time_components + num_time_components + imax + i]
 
-                    river_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + 2*num_time_components + i]
-                    river_boundary_testfunctions[i] = testtuple[2*M*num_time_components + 2*num_time_components + imax + i]
+                #     river_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + num_time_components + i]
+                #     river_boundary_testfunctions[i] = testtuple[2*M*num_time_components + num_time_components + imax + i]
 
                 self.Q_trialfunctions = Q_trialfunctions
                 self.river_boundary_testfunctions = river_boundary_testfunctions
@@ -466,37 +517,63 @@ class Hydrodynamics(object):
 
     # Public methods
 
-    def setup_weak_form(self):
-        a_total = ngsolve.BilinearForm(self.femspace)
+    # def setup_weak_form(self):
+    #     a_total = ngsolve.BilinearForm(self.femspace)
+
+    #     if self.model_options['sea_boundary_treatment'] == 'exact':
+    #         if self.model_options['river_boundary_treatment'] == 'exact':
+    #             weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
+    #                                     self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
+    #                                     self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
+    #                                     self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
+    #                                     A_trialfunctions=self.A_trialfunctions, sea_boundary_testfunctions=self.sea_boundary_testfunctions,
+    #                                     Q_trialfunctions=self.Q_trialfunctions, river_boundary_testfunctions=self.river_boundary_testfunctions)
+    #         else:
+    #             weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
+    #                                     self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
+    #                                     self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
+    #                                     self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
+    #                                     A_trialfunctions=self.A_trialfunctions, sea_boundary_testfunctions=self.sea_boundary_testfunctions)
+    #     elif self.model_options['river_boundary_treatment'] == 'exact':
+    #         weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
+    #                                 self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
+    #                                 self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
+    #                                 self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
+    #                                 Q_trialfunctions=self.Q_trialfunctions, river_boundary_testfunctions=self.river_boundary_testfunctions)
+    #     else:
+    #         weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
+    #                                 self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
+    #                                 self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
+    #                                 self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, only_linear=False)
+        
+    #     self.total_bilinearform = a_total
+
+    def setup_weak_form(self, static_condensation=False):
+        a_total = ngsolve.BilinearForm(self.femspace, condense=static_condensation)
 
         if self.model_options['sea_boundary_treatment'] == 'exact':
-            if self.model_options['river_boundary_treatment'] == 'exact':
-                weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-                                        self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-                                        self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-                                        self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
-                                        A_trialfunctions=self.A_trialfunctions, sea_boundary_testfunctions=self.sea_boundary_testfunctions,
-                                        Q_trialfunctions=self.Q_trialfunctions, river_boundary_testfunctions=self.river_boundary_testfunctions)
-            else:
-                weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-                                        self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-                                        self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-                                        self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
-                                        A_trialfunctions=self.A_trialfunctions, sea_boundary_testfunctions=self.sea_boundary_testfunctions)
-        elif self.model_options['river_boundary_treatment'] == 'exact':
-            weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-                                    self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-                                    self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-                                    self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
-                                    Q_trialfunctions=self.Q_trialfunctions, river_boundary_testfunctions=self.river_boundary_testfunctions)
+            A_trial_functions, sea_bc_test_functions = self.A_trialfunctions, self.sea_boundary_testfunctions
         else:
-            weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-                                    self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-                                    self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-                                    self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, only_linear=False)
-        
-        self.total_bilinearform = a_total
+            A_trial_functions, sea_bc_test_functions = None, None
 
+        if self.model_options['river_boundary_treatment'] == 'exact':
+            Q_trial_functions, river_bc_test_functions = self.Q_trialfunctions, self.river_boundary_testfunctions
+            normal_alpha, normal_alpha_y = self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y
+        else:
+            Q_trial_functions, river_bc_test_functions, normal_alpha, normal_alpha_y = None, None, None, None
+
+        weakforms.construct_non_linear_weak_form(a_total, self.model_options, self.geometric_information, self.numerical_information,
+                                                 self.constant_physical_parameters, self.spatial_parameters, self.spatial_parameters_grad,
+                                                 self.time_basis, self.vertical_basis,
+                                                 self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
+                                                 self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
+                                                 A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions,
+                                                 sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
+                                                 normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full',
+                                                 as_forcing_list=[], forcing_alpha=self.forcing_alpha, forcing_beta=self.forcing_beta,
+                                                 forcing_gamma=self.forcing_gamma, forcing_Q=self.forcing_Q)
+
+        self.total_bilinearform = a_total
 
     def restructure_solution(self):
         """Associates each part of the solution gridfunction vector to a Fourier and vertical eigenfunction pair."""
@@ -537,13 +614,32 @@ class Hydrodynamics(object):
             if self.model_options['river_boundary_treatment'] == 'exact': # if both layers are handled, then river follows the sea
                 self.Q_solution[0] = self.solution_gf.components[2*(M)*(2*imax+1) + 2*(2*imax + 1)]
                 for q in range(1, imax + 1):
-                    self.Q_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + 2*(2*imax + 1) + q]
-                    self.Q_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + 2*(2*imax + 1) + imax + q]
+                    # self.Q_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + 2*(2*imax + 1) + q]
+                    # self.Q_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + 2*(2*imax + 1) + imax + q]
+                    self.Q_solution[-q] = 0
+                    self.Q_solution[q] = 0
         elif self.model_options['river_boundary_treatment'] == 'exact':
             self.Q_solution[0] = self.solution_gf.components[2*(M)*(2*imax+1) + (2*imax + 1)]
             for q in range(1, imax + 1):
-                self.Q_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q]
-                self.Q_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q]
+                # self.Q_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q]
+                # self.Q_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q]
+                self.Q_solution[-q] = 0
+                self.Q_solution[q] = 0
+
+
+    def get_gradients(self, compiled=True):
+        M = self.numerical_information['M']
+        imax = self.numerical_information['imax']
+
+        self.alpha_grad = [dict() for _ in range(M)]
+        self.beta_grad = [dict() for _ in range(M)]
+        self.gamma_grad = dict()
+        
+        for i in range(-imax, imax + 1):
+            self.gamma_grad[i] = ngsolve.grad(self.gamma_solution[i]).Compile() if compiled else ngsolve.grad(self.gamma_solution[i])
+            for m in range(M):
+                self.alpha_grad[m][i] = ngsolve.grad(self.alpha_solution[m][i]).Compile() if compiled else ngsolve.grad(self.alpha_solution[m][i])
+                self.beta_grad[m][i] = ngsolve.grad(self.beta_solution[m][i]).Compile() if compiled else ngsolve.grad(self.beta_solution[m][i])
 
 
     def save(self, name: str, solution_format='npy'):
@@ -570,6 +666,7 @@ class Hydrodynamics(object):
         model_options.update(self.model_options)
 
         model_options['advection_influence_matrix'] = model_options['advection_influence_matrix'].tolist() # reformat advection_influence_matrix for json conversion
+        model_options['surface_interaction_influence_matrix'] = model_options['surface_interaction_influence_matrix'].tolist()
 
         with open(f"{name}/model_options.json", 'x') as f_options:
             json.dump(model_options, f_options, indent=4)
@@ -595,7 +692,9 @@ class Hydrodynamics(object):
 
         for paramname, value in self.spatial_parameters.items():
             with open(f'{name}/spatial_parameters/{paramname}.pkl', 'wb') as file:
-                cloudpickle.dump(value.fh, file, protocol=4)
+                # cloudpickle.dump(value.fh, file, protocol=4)
+                cloudpickle.dump(value, file, protocol=4)
+
 
         # solution
 
@@ -616,8 +715,8 @@ class Hydrodynamics(object):
         
         """
         if based_on == 'bathygrad':
-            bathy_gradnorm = ngsolve.sqrt(self.spatial_parameters['H'].gradient_cf[0] * self.spatial_parameters['H'].gradient_cf[0] + 
-                                          self.spatial_parameters['H'].gradient_cf[1] * self.spatial_parameters['H'].gradient_cf[1])
+            bathy_gradnorm = ngsolve.sqrt(self.spatial_parameters_grad['H'][0] * self.spatial_parameters_grad['H'][0] + 
+                                          self.spatial_parameters_grad['H'][1] * self.spatial_parameters_grad['H'][1])
         else:
             raise ValueError("Invalid value for 'based_on'. Please choose from the following options: 'bathygrad'.")
             
@@ -627,11 +726,10 @@ class Hydrodynamics(object):
 
            
             for name, param in self.spatial_parameters.items(): # SpatialParameter-objects need to be redefined on the new mesh
-                bfc = generate_bfc(self.mesh, self.numerical_information['order'], 'diffusion')
-                self.spatial_parameters[name] = SpatialParameter(param.fh, bfc)
+                self.spatial_parameters[name] = param
 
-            bathy_gradnorm = ngsolve.sqrt(self.spatial_parameters['H'].gradient_cf[0] * self.spatial_parameters['H'].gradient_cf[0] + 
-                                          self.spatial_parameters['H'].gradient_cf[1] * self.spatial_parameters['H'].gradient_cf[1])
+            bathy_gradnorm = ngsolve.sqrt(self.spatial_parameters_grad['H'][0] * self.spatial_parameters_grad['H'][0] + 
+                                          self.spatial_parameters_grad['H'][1] * self.spatial_parameters_grad['H'][1])
                 
             if num_refined == 0:
                 break
@@ -652,6 +750,7 @@ def load_hydrodynamics(name, solution_format='npy'):
         model_options = json.load(options_file)
 
     model_options['advection_influence_matrix'] = np.array(model_options['advection_influence_matrix'])
+    model_options['surface_interaction_influence_matrix'] = np.array(model_options['surface_interaction_influence_matrix'])
 
     with open(f"{name}/geometric_information.json", 'rb') as geom_file:
         geometric_information = json.load(geom_file)
@@ -668,14 +767,195 @@ def load_hydrodynamics(name, solution_format='npy'):
         param_name = filename[:-4] # ignore file extension
         with open(f'{name}/spatial_parameters/{filename}', 'rb') as spatial_parameter_file:
             spatial_parameters[param_name] = cloudpickle.load(spatial_parameter_file)
+            spatial_parameters[param_name].spacedim = 2 # cloudpickle forgets space dimension of CFs
 
     
     hydro = Hydrodynamics(model_options, geometric_information, numerical_information, constant_physical_parameters, spatial_parameters)
     hydro.solution_gf = ngsolve.GridFunction(hydro.femspace)
     load_basevector(hydro.solution_gf.vec, f"{name}/solution", format=solution_format)
     hydro.restructure_solution()
+    hydro.get_gradients(compiled=True)
 
     return hydro
+
+
+
+class DecomposedHydrodynamics(Hydrodynamics):
+
+
+    def __init__(self, parent_hydro: Hydrodynamics, forcing: list):
+        self.model_options = parent_hydro.model_options
+        self.model_options['sea_boundary_treatment'] = 'simple' # do not use internal boundary conditions for this model; these equations are non-linear and ruin the decomposition
+        self.model_options['river_boundary_treatment'] = 'simple'
+
+        self.geometric_information = parent_hydro.geometric_information # don't use internal boundary conditions.
+        self.geometric_information['L_BL_sea'] = 0
+        self.geometric_information['L_R_sea'] = 0
+        self.geometric_information['L_R_sea'] = 0
+        self.geometric_information['L_BL_river'] = 0
+        self.geometric_information['L_R_river'] = 0
+        self.geometric_information['L_R_river'] = 0
+
+        self.forcing = forcing
+
+        self.numerical_information = parent_hydro.numerical_information
+        self.constant_physical_parameters = parent_hydro.constant_physical_parameters
+        self.spatial_parameters = parent_hydro.spatial_parameters
+        self.spatial_parameters_grad = parent_hydro.spatial_parameters_grad
+
+        self.geom = parent_hydro.display_geom
+        self.mesh = parent_hydro.display_mesh
+
+        self.display_geom = parent_hydro.display_geom
+        self.display_mesh = parent_hydro.display_mesh
+
+        self.time_basis = parent_hydro.time_basis
+        self.vertical_basis = parent_hydro.vertical_basis
+
+        self._setup_fem_space()
+        self._setup_TnT()
+        self.solution_gf = ngsolve.GridFunction(self.femspace)
+        self.restructure_solution()
+
+        self.nfreedofs = count_free_dofs(self.femspace)
+
+        self.forcing_alpha = parent_hydro.alpha_solution
+        self.forcing_beta = parent_hydro.beta_solution
+        self.forcing_gamma = parent_hydro.gamma_solution
+        self.forcing_Q = parent_hydro.Q_solution
+        self.forcing_A = parent_hydro.A_solution
+
+
+    def setup_weak_form(self, static_condensation=True):
+        a_total = ngsolve.BilinearForm(self.femspace, condense=static_condensation)
+        rhs_total = ngsolve.LinearForm(self.femspace)
+
+        if self.model_options['sea_boundary_treatment'] == 'exact':
+            A_trial_functions, sea_bc_test_functions = self.A_trialfunctions, self.sea_boundary_testfunctions
+        else:
+            A_trial_functions, sea_bc_test_functions = None, None
+
+        if self.model_options['river_boundary_treatment'] == 'exact':
+            Q_trial_functions, river_bc_test_functions = self.Q_trialfunctions, self.river_boundary_testfunctions
+            normal_alpha, normal_alpha_y = self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y
+        else:
+            Q_trial_functions, river_bc_test_functions, normal_alpha, normal_alpha_y = None, None, None, None
+
+        weakforms.construct_non_linear_weak_form(a_total, self.model_options, self.geometric_information, self.numerical_information,
+                                                 self.constant_physical_parameters, self.spatial_parameters, self.spatial_parameters_grad,
+                                                 self.time_basis, self.vertical_basis,
+                                                 self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
+                                                 self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
+                                                 A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions,
+                                                 sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
+                                                 normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='linear_for_decomposition',
+                                                 as_forcing_list=self.forcing, forcing_alpha=self.forcing_alpha, forcing_beta=self.forcing_beta,
+                                                 forcing_gamma=self.forcing_gamma, forcing_Q=self.forcing_Q, linear_form=rhs_total)
+
+        self.total_bilinearform = a_total
+        self.total_linearform = rhs_total
+
+
+    def solve(self, linear_solver='pardiso', print_log=True, num_threads=12, static_condensation=True):
+
+        if print_log:
+            print(f"Initiating solution procedure for the linear model forced by the following collection of terms: {self.forcing}. The total number of free degrees of freedom is {self.nfreedofs}.\n")
+
+        if num_threads > 1:
+            ngsolve.SetHeapSize(200_000_000)
+            ngsolve.SetNumThreads(num_threads)
+
+        context = ngsolve.TaskManager() if num_threads > 1 else nullcontext()
+
+        # set up weak form
+        weak_form_start = timeit.default_timer()
+        with context:
+            self.setup_weak_form()
+        weak_form_time = timeit.default_timer() - weak_form_start
+        if print_log:
+            print(f"Setting up weak form took {np.round(weak_form_time, 3)} seconds.")
+
+        # assemble vector and matrix
+        assembly_start = timeit.default_timer()
+        with context:
+            self.total_bilinearform.Assemble()
+        
+            self.total_linearform.Assemble()
+        assembly_time = timeit.default_timer() - assembly_start
+        if print_log:
+            print(f"Assembling weak form took {np.round(assembly_time, 3)} seconds.")
+
+        # handle riverine boundary condition if the river bc is part of the forcing
+        if 'river_bc' in self.forcing: 
+            essential_bc_start = timeit.default_timer()
+            for l in range(-self.numerical_information['imax'], self.numerical_information['imax'] + 1):
+                for m in range(self.numerical_information['M']):
+                    self.solution_gf.components[m * (2*self.numerical_information['imax'] + 1)].Set(self.forcing_alpha[m][l], ngsolve.BND) # don't set on ngsolve.BND because this automatically takes the computational boundary instead of the internal boundary
+
+            rhs = self.total_linearform.vec.CreateVector()
+            with context:
+                rhs.data = self.total_linearform.vec - self.total_bilinearform.mat * self.solution_gf.vec
+            essential_bc_time = timeit.default_timer() - essential_bc_start
+            if print_log:
+                print(f"Handling essential BC took {np.round(essential_bc_time, 3)} seconds.")
+        else:
+            rhs = self.total_linearform.vec.CreateVector()
+            rhs.data = self.total_linearform.vec
+
+        # convert to scipy-sparse matrix if we don't use the built-in solver
+        if linear_solver != 'pardiso':
+            conversion_start = timeit.default_timer()
+            # Extract matrix and vector from ngsolve
+            freedof_list = get_freedof_list(self.femspace.FreeDofs())
+            mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(self.total_bilinearform.mat), freedof_list)
+            rhs_arr = rhs.FV().NumPy()[freedof_list]
+            conversion_time = timeit.default_timer() - conversion_start
+            if print_log:
+                print(f"Conversion of equation to scipy-sparse took {np.round(conversion_time, 3)} seconds.")
+
+        # invert system
+        inversion_start = timeit.default_timer()
+        if linear_solver == 'pardiso':
+            with context:
+                if static_condensation:
+                    invS = self.total_bilinearform.mat.Inverse(freedofs=self.femspace.FreeDofs(coupling=True), inverse='pardiso')
+                    ext = ngsolve.IdentityMatrix() + self.total_bilinearform.harmonic_extension
+                    extT = ngsolve.IdentityMatrix() + self.total_bilinearform.harmonic_extension_trans
+                    invA = ext @ invS @ extT + self.total_bilinearform.inner_solve
+                    self.solution_gf.vec.data = invA * rhs
+                else:
+                    self.solution_gf.vec.data = self.total_bilinearform.mat.Inverse(freedofs=self.femspace.FreeDofs(), inverse='pardiso') * rhs
+        elif linear_solver == 'scipy_direct':
+            solver = scipyLU_solver
+            sol = solver.solve(mat, rhs_arr, rcm=True)
+            self.solution_gf.vec.FV().NumPy()[freedof_list] = sol
+        elif linear_solver == 'pypardiso':
+            solver = pypardiso_spsolve
+            sol = solver.solve(mat, rhs_arr, rcm=True)
+            self.solution_gf.vec.FV().NumPy()[freedof_list] = sol
+        inversion_time = timeit.default_timer() - inversion_start
+
+        self.restructure_solution()
+        self.get_gradients()
+
+        if print_log:
+            print(f"Inversion of system took {np.round(inversion_time, 3)} seconds.")
+            print("Solution procedure complete.\n")
+        
+
+def decompose_hydro(hydro: Hydrodynamics, forcings, **kwargs):
+    contributions = {}
+    for name, forcing in forcings.items():
+        linear_hydro = DecomposedHydrodynamics(hydro, forcing)
+        linear_hydro.solve(**kwargs)
+        contributions[name] = linear_hydro
+    return contributions
+
+
+def save_decompositions(contributions: dict[str, Hydrodynamics], folder_name):
+    os.makedirs(folder_name, exist_ok=True)
+    for forcing_name, hydro in contributions.items():
+        hydro.save(f'{folder_name}/{forcing_name}')
 
 
 class RiverineForcing(object):
@@ -709,15 +989,15 @@ class RiverineForcing(object):
         if self.hydro.model_options['bed_bc'] == 'partial_slip':
             sf = hydro.constant_physical_parameters['sf']
 
-        H = self.hydro.spatial_parameters['H'].cf
-        Hy = self.hydro.spatial_parameters['H'].gradient_cf[1]
-        R = self.hydro.spatial_parameters['R'].cf
-        Ry = self.hydro.spatial_parameters['H'].gradient_cf[1]
+        H = self.hydro.spatial_parameters['H']
+        Hy = self.hydro.spatial_parameters_grad['H'][1]
+        R = self.hydro.spatial_parameters['R']
+        Ry = self.hydro.spatial_parameters_grad['H'][1]
 
         if manual:
             self.discharge_cf = discharge
         else:
-            self.discharge = discharge
+            self.discharge = discharge * np.sqrt(2)
 
             # integrate (H+R)^2 over width
             y = np.linspace(-0.5, 0.5, 1001)
@@ -726,7 +1006,7 @@ class RiverineForcing(object):
             eval_integrand = evaluate_CF_range((H+R)*(H+R), hydro.mesh, np.ones_like(y), y) # currently only works for unit square domains!
             integral = dy * eval_integrand.sum() # numerical integration with leftpoint rule
 
-            self.discharge_cf = (H+R) * (H+R) / (hydro.geometric_information['y_scaling'] * integral)
+            self.discharge_cf = np.sqrt(2) * (H+R) * (H+R) / (hydro.geometric_information['y_scaling'] * integral)
 
         # project vertical structure onto vertical basis
 
@@ -750,12 +1030,12 @@ class RiverineForcing(object):
         if self.hydro.model_options['bed_bc'] == 'no_slip':
             for m in range(hydro.numerical_information['M']):
                 self.normal_alpha.append(-projection.coefficients[m] * 1.5 * self.discharge_cf / (H + R))
-                self.normal_alpha_y.append(-projection.coefficients[m] * 1.5 * (Hy + Ry) / (hydro.geometric_information['y_scaling'] * integral))
+                self.normal_alpha_y.append(-projection.coefficients[m] * 1.5 * np.sqrt(2) * (Hy + Ry) / (hydro.geometric_information['y_scaling'] * integral))
 
         elif self.hydro.model_options['bed_bc'] == 'partial_slip':
             for m in range(hydro.numerical_information['M']):
-                self.normal_alpha.append(-projection.coefficients[m] * (3 * sf * self.discharge_cf) / ((2*sf + 6*Av)))
-                self.normal_alpha_y.append(-projection.coefficients[m] * (3 * sf * ((Hy + Ry)/(hydro.geometric_information['y_scaling']*integral)) / (2*sf + 6*Av)))
+                self.normal_alpha.append(-projection.coefficients[m] * (3 * sf * self.discharge_cf) / ((H+R)*(2*sf + 6*Av)))
+                self.normal_alpha_y.append(-projection.coefficients[m] * (3 * sf * (np.sqrt(2) * (Hy + Ry)/(hydro.geometric_information['y_scaling']*integral)) / (2*sf + 6*Av)))
 
 
 class SeawardForcing(object):
@@ -776,11 +1056,23 @@ class SeawardForcing(object):
             self.amplitudes.append(0)
             self.phases.append(0)
 
-        self.cfdict = {0: self.amplitudes[0]}
+        self.cfdict = {0: self.amplitudes[0] * np.sqrt(2)}
         self.boundaryCFdict = {0: hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[0]}, default=0)}
         for i in range(1, hydro.numerical_information['imax'] + 1):
             self.cfdict[i] = self.amplitudes[i] * ngsolve.cos(self.phases[i-1]) # phase for residual flow is not defined, therefore list index i - 1
-            self.cfdict[-i] = self.amplitudes[i] * ngsolve.sin(self.phases[i-1])
+            self.cfdict[-i] = -self.amplitudes[i] * ngsolve.sin(self.phases[i-1])
 
             self.boundaryCFdict[i] = hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[i]}, default=0)
             self.boundaryCFdict[-i] = hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[-i]}, default=0)
+
+
+
+
+
+
+            
+
+
+
+        
+        

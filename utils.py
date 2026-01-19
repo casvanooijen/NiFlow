@@ -303,6 +303,21 @@ def get_freedof_list(freedof_bitarray):
     return freedof_list
 
 
+def dof_division(fespace):
+    """Returns a dictionary with keys being the coupling types used (bubble, edge, vertex), and values being how many of these dofs the fespace has.
+    Copied from https://docu.ngsolve.org/latest/i-tutorials/unit-1.4-staticcond/staticcond.html"""
+
+    dof_types = {}
+    for i in range(fespace.ndof):
+        ctype = fespace.CouplingType(i)
+        if ctype in dof_types.keys():
+            dof_types[ctype] += 1
+        else:
+            dof_types[ctype] = 1
+    return dof_types
+
+
+
 def basematrix_to_csr_matrix(mat: ngsolve.BaseMatrix):
     """Converts an ngsolve BaseMatrix to a scipy sparse matrix in CSR-format. Returns the CSR-matrix
     
@@ -438,6 +453,57 @@ def minusonepower(n: int):
         return 1
     else:
         return -1
+
+
+def take_second_derivative(gf:ngsolve.GridFunction, fespace: ngsolve.FESpace, direction: int):
+    """Returns Coefficient Function of second derivative of a Gridfunction in x- or y-direction.
+    
+    Arguments:
+
+    - gf (ngsolve.GridFunction):            GridFunction to take derivative of;
+    - fespace (ngsolve.FESpace):            Finite ELement space that gf is defined on; must be one-dimensional (no vector values).
+    - direction (int):                      direction of the second derivative. Either 0 (x) or 1 (y).
+    """
+    if direction not in [0, 1]:
+        raise ValueError("Invalid direction specified. Use either 0 (x) or 1 (y).")
+
+    first_derivative = ngsolve.GridFunction(fespace)
+    first_derivative.Set(ngsolve.grad(gf)[direction])
+    return ngsolve.grad(first_derivative)[direction]
+
+
+def CF_times_arr(cf: ngsolve.CoefficientFunction, arr: np.ndarray):
+    if not isinstance(arr, np.ndarray):
+        try:
+            return arr * cf
+        except TypeError:
+            raise ValueError("Invalid type for arr: please input number or numpy array")                  
+
+    flat_arr = arr.flatten()
+    result = np.empty_like(flat_arr, dtype=ngsolve.CoefficientFunction)
+    for k in range(flat_arr.shape[0]):
+        result[k] = cf * flat_arr[k]
+    return result.reshape(arr.shape)
+
+def cosh_of_arr(arr: np.ndarray):
+    if not isinstance(arr, np.ndarray):
+        try:
+            return ngsolve.cosh(arr)
+        except TypeError:
+            raise ValueError("Invalid type for arr: please input number or numpy array")    
+    
+    flat_arr = arr.flatten()
+    result = np.empty_like(flat_arr, dtype=ngsolve.CoefficientFunction)
+    for k in range(flat_arr.shape[0]):
+        result[k] = ngsolve.cosh(flat_arr[k])
+    return result.reshape(arr.shape)
+
+
+def L2err_vector_gridfunction(gf1, gf2, mesh):
+    error_squared = 0
+    for component1, component2 in zip(gf1.components, gf2.components):
+        error_squared += ngsolve.Integrate((component1 - component2)**2, mesh)
+    return ngsolve.sqrt(error_squared)
 
 
 

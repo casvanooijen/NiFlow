@@ -1,20 +1,23 @@
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import spsolve
+from scipy.sparse.csgraph import reverse_cuthill_mckee
 import timeit
 import ngsolve
 import copy
 import matplotlib.pyplot as plt
 import pypardiso
+from contextlib import nullcontext
 
 from NiFlow.hydrodynamics import *
 import NiFlow.define_weak_forms as weakforms
 from NiFlow.utils import *
+from NiFlow.linear_solver import *
 
 
-def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-12, linear_solver = 'pardiso', 
-          continuation_parameters: dict = {'advection_epsilon': [1], 'Av': [1], 'Ah': [1]}, stopcriterion = 'scaled_2norm',
-          plot_intermediate_results='none', parallel=True, matrix_analysis=False, print_log:bool=True):
+def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-12, linear_solver = 'pypardiso', preconditioner = 'identity',
+          continuation_parameters: dict = {'advection_epsilon': [1], 'surface_epsilon': [1], 'Av': [1], 'Ah': [1]}, stopcriterion = 'scaled_2norm',
+          plot_intermediate_results='none', num_threads=1, static_condensation=False, matrix_analysis=False, print_log:bool=True, reduce_bandwidth:bool=False, oseen_linearisation=False):
 
     """
     
@@ -26,13 +29,16 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
         - hydro (Hydrodynamics):            object containing the (weak) model equations and options;
         - max_iterations (int):             maximum number of Newton iterations per continuation step;
         - tolerance (float):                if the stopping criterion is less than this value, the Newton method terminates and the procedure moves to the next continuation step;
-        - linear_solver:                    choice of linear solver; options: 'pardiso', 'pypardiso', 'scipy_direct', 'bicgstab'
+        - linear_solver:                    choice of linear solver; options: 'pardiso', 'pypardiso', 'scipy_direct', 'bicgstab', 'gmres', 'uzawa'
+        - preconditioner:                   choice of preconditioner; options: 'identity', 'block_diagonal_diagonal', 'block_diagonal_utriangular', 'block_diagonal_ltriangular'
         - continuation_parameters (dict):   dictionary with keys 'advection_epsilon' and 'Av' and 'Ah', with values indicating what the default value of these parameters should be multiplied by in each continuation step;
-        - stopcriterion:                    choice of stopping criterion; options: 'matrix_norm', 'scaled_2norm', 'relative_newtonstepsize';
+        - stopcriterion:                    choice of stopping criterion; options: 'relative_residual_norm', 'matrix_norm', 'scaled_2norm', 'relative_newtonstepsize';
         - plot_intermediate_results:        indicates whether intermediate results should be plotted and saved; options: 'none' (default), 'all' and 'overview'.
-        - parallel:                         flag indicating whether time-costly operations should be performed in parallel (see https://docu.ngsolve.org/latest/how_to/howto_parallel.html)
+        - num_threads:                      flag indicating whether time-costly operations should be performed in parallel (see https://docu.ngsolve.org/latest/how_to/howto_parallel.html) with num_threads threads. If num_threads==1, then no parallel computation performed.
+        - static_condensation:              flag indicating whether static condensation should be used. 
         - matrix_analysis:                  if True, plots the non-zero elements of the matrix, the size of all entries via a colormap, and the right-hand side vector using a colormap.
         - print_log:                        if True, prints runtimes of the steps of the solution process, as well as stopping criterion values.
+        - reduce_bandwidth:                 if True, applies the reverse Cuthill-McKee algorithm to the matrix and right-hand side vector.
     
     """
 
@@ -46,57 +52,33 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
     else:
         raise ValueError(f"Length of both continuation parameter lists must be equal; now the lenghts are {len(continuation_parameters['advection_epsilon'])} and {len(continuation_parameters['Av'])} and {len(continuation_parameters['Ah'])}")
 
+    # set options for parallel computation
+    if num_threads > 1:
+        ngsolve.SetHeapSize(100_000_000)
+        ngsolve.SetNumThreads(num_threads)
+
+    context = ngsolve.TaskManager() if num_threads > 1 else nullcontext()
+
     # Report that solution procedure is about to start.
     if print_log:
         print(f"Initiating solution procedure for hydrodynamics-model with {hydro.numerical_information['M']} vertical components and {hydro.numerical_information['imax'] + 1} tidal constituents (including residual).\nThe total number of free degrees of freedom is {hydro.nfreedofs}.")
 
-    # If improve_seaward_initial_guess, do a linear simulation first
-
-    if hydro.model_options['sea_boundary_treatment'] == 'linear_guess':
-        if print_log:
-            print("Doing a linear simulation to get a good guess for the correct computational seaward boundary condition.\n")
-        linear_geometric_information = copy.deepcopy(hydro.geometric_information)
-        # linear_geometric_information['L_BL_sea'] += linear_geometric_information['L_R_sea']
-        # linear_geometric_information['L_R_sea'] = 0
-        
-        linear_model_options = copy.deepcopy(hydro.model_options)
-        linear_model_options['advection_influence_matrix'] = np.full((imax+1, imax+1), False)
-        linear_model_options['sea_boundary_treatment'] = 'simple'
-
-        linear_hydro = Hydrodynamics(linear_model_options, linear_geometric_information, hydro.numerical_information, hydro.constant_physical_parameters, hydro.sympy_spatial_parameters)
-        solve(linear_hydro, max_iterations, tolerance, linear_solver, continuation_parameters={'advection_epsilon': [1], 'Av': [1], 'Ah': [1]}, stopcriterion=stopcriterion, plot_intermediate_results=False, 
-              parallel=parallel, matrix_analysis=False, print_log=False)
-
-        linear_gamma_complex = np.array([evaluate_CF_point(linear_hydro.gamma_solution[l], linear_hydro.mesh, 0, 0) - 1j*evaluate_CF_point(linear_hydro.gamma_solution[-l], linear_hydro.mesh, 0, 0) for l in range(1, imax+1)]).astype(complex)
-        standard_initial_guess_complex = np.array([hydro.seaward_forcing.amplitudes[l]*np.cos(hydro.seaward_forcing.phases[l-1]) - 1j*hydro.seaward_forcing.amplitudes[l]*np.sin(hydro.seaward_forcing.phases[l-1]) for l in range(1, imax+1)]).astype(complex)
-        improved_initial_guess_complex = standard_initial_guess_complex / linear_gamma_complex
-
-        improved_initial_guess_cos = improved_initial_guess_complex.real
-        improved_initial_guess_sin = improved_initial_guess_complex.imag
-
-
     # Set initial guess
     sol = ngsolve.GridFunction(hydro.femspace)
-        # tidal waterlevel
 
-    if hydro.model_options['sea_boundary_treatment'] == 'simple': # if we handle the seaward boundary condition, then setting the boundary condition will be done later
-        sol.components[2*(M)*(2*imax+1)].Set(hydro.seaward_forcing.cfdict[0], ngsolve.BND)
+    # surface
+    sol.components[2*(M)*(2*imax+1)].Set(hydro.seaward_forcing.cfdict[0])
 
+    for q in range(1, imax + 1):
+        sol.components[2*(M)*(2*imax+1) + q].Set(hydro.seaward_forcing.cfdict[-q])
+        sol.components[2*(M)*(2*imax+1) + imax + q].Set(hydro.seaward_forcing.cfdict[q])
+
+    # surface coefficients A_l
+    if hydro.model_options['sea_boundary_treatment'] == 'exact':
+        sol.components[2*(M)*(2*imax+1) + (2*imax + 1)].Set(hydro.seaward_forcing.amplitudes[0] * np.sqrt(2))
         for q in range(1, imax + 1):
-            sol.components[2*(M)*(2*imax+1) + q].Set(hydro.seaward_forcing.cfdict[-q], ngsolve.BND)
-            sol.components[2*(M)*(2*imax+1) + imax + q].Set(hydro.seaward_forcing.cfdict[q], ngsolve.BND)
-    elif hydro.model_options['sea_boundary_treatment'] == 'exact':
-        sol.components[2*(M)*(2*imax+1) + (2*imax + 1)].Set(hydro.seaward_forcing.amplitudes[0])
-        for q in range(1, imax + 1):
-            sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q].Set(hydro.seaward_forcing.amplitudes[q]*np.sin(hydro.seaward_forcing.phases[q-1])) # phase_list starts at semidiurnal component instead of residual; therefore index - 1
-            sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q].Set(hydro.seaward_forcing.amplitudes[q]*np.cos(hydro.seaward_forcing.phases[q-1]))   
-            # sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q].Set(improved_initial_guess_sin[q-1]) # phase_list starts at semidiurnal component instead of residual; therefore index - 1
-            # sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q].Set(improved_initial_guess_cos[q-1])   
-    elif hydro.model_options['sea_boundary_treatment'] == 'linear_guess':
-        sol.components[2*(M)*(2*imax+1)].Set(hydro.seaward_forcing.cfdict[0], ngsolve.BND)
-        for q in range(1, imax + 1):
-            sol.components[2*(M)*(2*imax+1) + q].Set(improved_initial_guess_sin[q-1], ngsolve.BND)
-            sol.components[2*(M)*(2*imax+1) + imax + q].Set(improved_initial_guess_cos[q-1], ngsolve.BND)
+            sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q].Set(-hydro.seaward_forcing.amplitudes[q]*np.sin(hydro.seaward_forcing.phases[q-1])) # phase_list starts at semidiurnal component instead of residual; therefore index - 1
+            sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q].Set(hydro.seaward_forcing.amplitudes[q]*np.cos(hydro.seaward_forcing.phases[q-1])) 
 
         # river discharge
     if hydro.model_options['river_boundary_treatment'] != 'exact':
@@ -108,25 +90,23 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
     # Save true values of advection_epsilon and Av before modifying them in the continuation (homology) method
 
     true_epsilon = copy.copy(hydro.constant_physical_parameters['advection_epsilon'])
+    true_surface_epsilon = copy.copy(hydro.constant_physical_parameters['surface_epsilon'])
     true_Av = copy.copy(hydro.constant_physical_parameters['Av'])
     true_Ah = copy.copy(hydro.constant_physical_parameters['Ah'])
 
     for continuation_counter in range(num_continuation_steps):
         hydro.constant_physical_parameters['advection_epsilon'] = true_epsilon * continuation_parameters['advection_epsilon'][continuation_counter]
+        hydro.constant_physical_parameters['surface_epsilon'] = true_surface_epsilon * continuation_parameters['surface_epsilon'][continuation_counter]
         hydro.constant_physical_parameters['Av'] = true_Av * continuation_parameters['Av'][continuation_counter]
         hydro.constant_physical_parameters['Ah'] = true_Ah * continuation_parameters['Ah'][continuation_counter]
 
         if print_log:
             if num_continuation_steps > 1:
-                print(f"\nCONTINUATION STEP {continuation_counter}: Epsilon = {hydro.constant_physical_parameters['advection_epsilon']}, Av = {hydro.constant_physical_parameters['Av']}, Ah = {hydro.constant_physical_parameters['Ah']}.\n")
+                print(f"\nCONTINUATION STEP {continuation_counter}: Advection Epsilon = {hydro.constant_physical_parameters['advection_epsilon']}, Surface epsilon = {hydro.constant_physical_parameters['surface_epsilon']}, Av = {hydro.constant_physical_parameters['Av']}, Ah = {hydro.constant_physical_parameters['Ah']}.\n")
             print("Setting up full weak form\n")
 
-        if parallel:
-            with ngsolve.TaskManager():
-                hydro.setup_weak_form()
-        else:
-            hydro.setup_weak_form()
-
+        with context:
+            hydro.setup_weak_form(static_condensation=static_condensation)
 
         # Start the Newton method
 
@@ -136,198 +116,115 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             if print_log:
                 print(f"Newton-Raphson iteration {newton_counter}")
             hydro.restructure_solution() # restructure solution so that hydro.alpha_solution, hydro.beta_solution, and hydro.gamma_solution are specified.
+            hydro.get_gradients(compiled=True)
             # Set-up weak form of the linearisation
 
             forms_start = timeit.default_timer()
-            if parallel:
-                with ngsolve.TaskManager():
-                    a = ngsolve.BilinearForm(hydro.femspace)
-                    if hydro.model_options['sea_boundary_treatment'] == 'exact':
-                        if hydro.model_options['river_boundary_treatment'] == 'exact':
-                            weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                    hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                                    hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                    hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y, only_linear=True,
-                                                    A_trialfunctions=hydro.A_trialfunctions, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions,
-                                                    Q_trialfunctions=hydro.Q_trialfunctions, river_boundary_testfunctions=hydro.river_boundary_testfunctions)
-                        else:
-                            weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                    hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                                    hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                    hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y, only_linear=True,
-                                                    A_trialfunctions=hydro.A_trialfunctions, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions)
-                    elif hydro.model_options['river_boundary_treatment'] == 'exact':
-                        weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                                hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y, only_linear=True,
-                                                Q_trialfunctions=hydro.Q_trialfunctions, river_boundary_testfunctions=hydro.river_boundary_testfunctions)
-                    else:
-                        weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                                hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, only_linear=True)
-                        
-                    if hydro.constant_physical_parameters['advection_epsilon'] != 0:
-                        if hydro.model_options['sea_boundary_treatment'] == 'exact':
-                            if hydro.model_options['river_boundary_treatment'] == 'exact':
-                                weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                         hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                         hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                         hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                         hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
-                                                                         A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions,
-                                                                         Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
-                            else:
-                                weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                         hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                         hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                         hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                         hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
-                                                                         A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions)
-                        elif hydro.model_options['river_boundary_treatment'] == 'exact':
-                            weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                     hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                     hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                     hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                     hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
-                                                                     Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
-                        else:
-                            weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                     hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                     hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                     hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                     hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha)
+            
+            with context:
+                a = ngsolve.BilinearForm(hydro.femspace, condense=static_condensation)
 
-            else:
-                a = ngsolve.BilinearForm(hydro.femspace)
                 if hydro.model_options['sea_boundary_treatment'] == 'exact':
-                    if hydro.model_options['river_boundary_treatment'] == 'exact':
-                        weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                                hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y, only_linear=True,
-                                                A_trialfunctions=hydro.A_trialfunctions, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions,
-                                                Q_trialfunctions=hydro.Q_trialfunctions, river_boundary_testfunctions=hydro.river_boundary_testfunctions)
-                    else:
-                        weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                                hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y, only_linear=True,
-                                                A_trialfunctions=hydro.A_trialfunctions, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions)
-                elif hydro.model_options['river_boundary_treatment'] == 'exact':
-                    weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                            hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                            hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                            hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y, only_linear=True,
-                                            Q_trialfunctions=hydro.Q_trialfunctions, river_boundary_testfunctions=hydro.river_boundary_testfunctions)
+                    A_trial_functions, sea_bc_test_functions = hydro.A_trialfunctions, hydro.sea_boundary_testfunctions
                 else:
-                    weakforms.add_weak_form(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                            hydro.alpha_trialfunctions, hydro.beta_trialfunctions, hydro.gamma_trialfunctions,
-                                            hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                            hydro.vertical_basis, hydro.time_basis, hydro.riverine_forcing.normal_alpha, only_linear=True)
-                    
-                if hydro.constant_physical_parameters['advection_epsilon'] != 0:
-                    if hydro.model_options['sea_boundary_treatment'] == 'exact':
-                        if hydro.model_options['river_boundary_treatment'] == 'exact':
-                            weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                        hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                        hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                        hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                        hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
-                                                                        A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions,
-                                                                        Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
-                        else:
-                            weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                        hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                        hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                        hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                        hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
-                                                                        A_trialfunctions=hydro.A_trialfunctions, A0=hydro.A_solution, sea_boundary_testfunctions=hydro.sea_boundary_testfunctions)
-                    elif hydro.model_options['river_boundary_treatment'] == 'exact':
-                        weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                    hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                    hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                    hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                    hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y,
-                                                                    Q_trialfunctions=hydro.Q_trialfunctions, Q0=hydro.Q_solution)
-                    else:
-                        weakforms.add_linearised_nonlinear_terms(a, hydro.model_options, hydro.numerical_information, hydro.geometric_information, hydro.constant_physical_parameters, hydro.spatial_parameters,
-                                                                    hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
-                                                                    hydro.gamma_trialfunctions, hydro.gamma_solution,
-                                                                    hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
-                                                                    hydro.vertical_basis, hydro.time_basis, hydro.seaward_forcing.amplitudes, hydro.riverine_forcing.normal_alpha)
+                    A_trial_functions, sea_bc_test_functions = None, None
+
+                if hydro.model_options['river_boundary_treatment'] == 'exact':
+                    Q_trial_functions, river_bc_test_functions = hydro.Q_trialfunctions, hydro.river_boundary_testfunctions
+                    Q0 = hydro.Q_solution
+                    normal_alpha, normal_alpha_y = hydro.riverine_forcing.normal_alpha, hydro.riverine_forcing.normal_alpha_y
+                else:
+                    Q_trial_functions, Q0, river_bc_test_functions, normal_alpha, normal_alpha_y = None, None, None, None, None
+
+                # compile_previous_newton_iterate(hydro)
+                weakforms.construct_linearised_weak_form(a, hydro.model_options, hydro.geometric_information, hydro.numerical_information,
+                                                            hydro.constant_physical_parameters, hydro.spatial_parameters, hydro.spatial_parameters_grad,
+                                                            hydro.time_basis, hydro.vertical_basis,
+                                                            hydro.alpha_trialfunctions, hydro.alpha_solution, hydro.beta_trialfunctions, hydro.beta_solution,
+                                                            hydro.gamma_trialfunctions, hydro.gamma_solution,
+                                                            hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
+                                                            A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions, Q0 = Q0,
+                                                            sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
+                                                            normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full', oseen_linearisation=oseen_linearisation)
+
+
             forms_time = timeit.default_timer() - forms_start
             if print_log:
                 print(f"    Weak form construction took {np.round(forms_time, 3)} seconds")
 
             # Assemble system matrix
             assembly_start = timeit.default_timer()
-            if parallel:
-                with ngsolve.TaskManager():
-                    a.Assemble()
-            else:
+            with context:
                 a.Assemble()
             assembly_time = timeit.default_timer() - assembly_start
             if print_log:
                 print(f"    Assembly took {np.round(assembly_time, 3)} seconds")
 
             if matrix_analysis:
-                fig, ax = plt.subplots(1, 3)
+                fig, ax = plt.subplots()
                 freedofs = get_freedof_list(hydro.femspace.FreeDofs())
-                mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(a.mat), freedofs).todense()
-                ax[0].spy(mat)
-                im = ax[1].imshow(mat, cmap='RdBu', vmin = -np.amax(np.absolute(mat)), vmax = np.amax(np.absolute(mat)))
+                mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(a.mat), freedofs)
+                if reduce_bandwidth:
+                    cmind = reverse_cuthill_mckee(mat)
+                    mat = mat[cmind[:, None], cmind]
+                # ax.spy(mat.todense())
+                ax.set_xticklabels(["" for _ in ax.get_xticks()])
+                ax.set_yticklabels(["" for _ in ax.get_yticks()])
+                for i in range(mat.shape[0]):
+                    print(f'{i}: maximum is {np.amax(np.absolute(mat[i, :]))}')
+                # im = ax[1].imshow(mat, cmap='RdBu', vmin = -np.amax(np.absolute(mat)), vmax = np.amax(np.absolute(mat)))
                 print(f"Largest matrix element has magnitude {np.amax(np.absolute(mat))}")
 
             # Solve linearisation
+            if print_log:
+                rhs_creation_start = timeit.default_timer()
             rhs = hydro.solution_gf.vec.CreateVector()
-            hydro.total_bilinearform.Apply(hydro.solution_gf.vec, rhs)
+            with context:
+                hydro.total_bilinearform.Apply(hydro.solution_gf.vec, rhs)
 
-            if matrix_analysis:
-                ax[2].imshow(np.tile(rhs.FV().NumPy()[freedofs], (len(freedofs),1)).T, cmap='RdBu', vmin=-np.amax(rhs.FV().NumPy()), vmax=np.amax(rhs.FV().NumPy()))
-                plt.show()
-
+            if print_log:
+                print(f"    Construction of right-hand side vector took {np.round(timeit.default_timer() - rhs_creation_start, 3)} seconds")
  
             du = ngsolve.GridFunction(hydro.femspace)
             for i in range(hydro.femspace.dim):
                 du.components[i].Set(0, ngsolve.BND) # homogeneous boundary conditions
 
+            if linear_solver != 'pardiso':
+                conversion_start = timeit.default_timer()
+                # Extract matrix and vector from ngsolve
+                freedof_list = get_freedof_list(hydro.femspace.FreeDofs())
+                mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(a.mat), freedof_list)
+                rhs_arr = rhs.FV().NumPy()[freedof_list]
+                conversion_time = timeit.default_timer() - conversion_start
+                if print_log:
+                    print(f"    Conversion to scipy-sparse matrix took {np.round(conversion_time, 3)} seconds")
+
             inversion_start = timeit.default_timer()
             if linear_solver == 'pardiso':
-                if parallel:
-                    with ngsolve.TaskManager():
+                with context:
+                    if static_condensation: # see https://docu.ngsolve.org/latest/i-tutorials/unit-1.4-staticcond/staticcond.html for explanation of why we do the solution like this
+                        invS = a.mat.Inverse(freedofs=hydro.femspace.FreeDofs(coupling=True), inverse='pardiso')
+                        ext = ngsolve.IdentityMatrix() + a.harmonic_extension
+                        extT = ngsolve.IdentityMatrix() + a.harmonic_extension_trans
+                        invA = ext @ invS @ extT + a.inner_solve
+                        du.vec.data = invA * rhs
+                        # for testing static condensation
+                        if print_log: 
+                            dof_types = dof_division(hydro.femspace)
+                            for ctype in dof_types.keys():
+                                if str(ctype) == "COUPLING_TYPE.LOCAL_DOF":
+                                    num_local_dofs = dof_types[ctype]
+                        print(f"    Number of effective degrees of freedom (non-local dofs) equal to {hydro.nfreedofs - num_local_dofs}.")
+                    else:
                         du.vec.data = a.mat.Inverse(freedofs=hydro.femspace.FreeDofs(), inverse='pardiso') * rhs
-                else:
-                    du.vec.data = a.mat.Inverse(freedofs=hydro.femspace.FreeDofs(), inverse='pardiso') * rhs
+
             elif linear_solver == 'scipy_direct':
-
-                freedof_list = get_freedof_list(hydro.femspace.FreeDofs())
-                mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(a.mat), freedof_list)
-                rhs_arr = rhs.FV().NumPy()[freedof_list]
-
-                sol = spsolve(mat, rhs_arr)
+                solver = scipyLU_solver
+                sol = solver.solve(mat, rhs_arr, rcm=reduce_bandwidth)
                 du.vec.FV().NumPy()[freedof_list] = sol
             elif linear_solver == 'pypardiso':
-
-                freedof_list = get_freedof_list(hydro.femspace.FreeDofs())
-                mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(a.mat), freedof_list)
-                rhs_arr = rhs.FV().NumPy()[freedof_list]
-
-                sol = pypardiso.spsolve(mat, rhs_arr) 
-                du.vec.FV().NumPy()[freedof_list] = sol
-
-            elif linear_solver == 'bicgstab':
-                freedof_list = get_freedof_list(hydro.femspace.FreeDofs())
-                mat = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(a.mat), freedof_list)
-                initial_guess = hydro.solution_gf.vec.FV().NumPy()[freedof_list]
-                sol, exitcode = bicgstab(mat, rhs_arr, initial_guess)
-
-                if exitcode == 0:
-                    print(f"    Bi-CGSTAB did not converge in 500 iterations")
-                else:
-                    print(f"    Bi-CGSTAB converged in {exitcode} iterations")
-
+                solver = pypardiso_spsolve
+                sol = solver.solve(mat, rhs_arr, rcm=reduce_bandwidth) 
                 du.vec.FV().NumPy()[freedof_list] = sol
             else:
                 raise ValueError(f"Linear solver '{linear_solver}' not known to the system.")
@@ -343,10 +240,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             # Compute stopping criterion
             residual = hydro.solution_gf.vec.CreateVector()
             apply_start = timeit.default_timer()
-            if parallel:
-                with ngsolve.TaskManager():
-                    hydro.total_bilinearform.Apply(hydro.solution_gf.vec, residual)
-            else:
+            with context:
                 hydro.total_bilinearform.Apply(hydro.solution_gf.vec, residual)
             
             apply_time = timeit.default_timer() - apply_start
@@ -361,6 +255,8 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                 stopcriterion_value = ngsolve.sqrt(ngsolve.InnerProduct(residual, residual) / hydro.nfreedofs)
             elif stopcriterion == 'relative_newtonstepsize':
                 stopcriterion_value = ngsolve.sqrt(ngsolve.InnerProduct(hydro.solution_gf.vec - previous_iterate.vec, hydro.solution_gf.vec - previous_iterate.vec)) / ngsolve.sqrt(ngsolve.InnerProduct(hydro.solution_gf.vec, hydro.solution_gf.vec))
+            elif stopcriterion == 'relative_residual_norm':
+                stopcriterion_value = ngsolve.sqrt(ngsolve.InnerProduct(residual, residual) / ngsolve.InnerProduct(rhs, rhs))
             else:
                 raise ValueError(f"Stopping criterion '{stopcriterion}' not known to the system.")
             
@@ -450,7 +346,10 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             else:
                 previous_iterate = copy.copy(hydro.solution_gf)
     if print_log:
+        hydro.restructure_solution() #
+        hydro.get_gradients(compiled=True) 
         print('\nSolution process complete.')
+
 
 # tools for matrix analysis
 
@@ -546,67 +445,75 @@ def get_condition_number(mat, maxits = 100, tol=1e-9):
     return large_eig / small_eig
 
 
+def compile_previous_newton_iterate(hydro: Hydrodynamics):
+    for i in range(-hydro.numerical_information['imax'], hydro.numerical_information['imax'] + 1):
+        hydro.gamma_solution[i] = hydro.gamma_solution[i].Compile()
+        for m in range(hydro.numerical_information['M']):
+            hydro.alpha_solution[m][i].Compile()
+            hydro.beta_solution[m][i].Compile()
+
+
 
 # Linear solvers
 
 
-def bicgstab(A, f, u0, tol=1e-12, maxits = 500):
-    """Carries out a Bi-CGSTAB solver based on the pseudocode in Van der Vorst (1992). This function has the option for a
-    reduced basis preconditioner if reduced_A and transition_mass_matrix are specified. Returns the solution and an exitcode
-    indicating how many iterations it took for convergence. If exitcode=0 is returned, then the method did not converge.
-    This implementation is heavily based on the scipy-implementation that can be found on https://github.com/scipy/scipy/blob/main/scipy/sparse/linalg/_isolve/iterative.py.
-    The function is also included in this file, so that the reduced-basis preconditioner can be used.
+# def bicgstab(A, f, u0, tol=1e-12, maxits = 500):
+#     """Carries out a Bi-CGSTAB solver based on the pseudocode in Van der Vorst (1992). This function has the option for a
+#     reduced basis preconditioner if reduced_A and transition_mass_matrix are specified. Returns the solution and an exitcode
+#     indicating how many iterations it took for convergence. If exitcode=0 is returned, then the method did not converge.
+#     This implementation is heavily based on the scipy-implementation that can be found on https://github.com/scipy/scipy/blob/main/scipy/sparse/linalg/_isolve/iterative.py.
+#     The function is also included in this file, so that the reduced-basis preconditioner can be used.
     
-    Arguments:
+#     Arguments:
     
-    - A:                        system matrix;
-    - f:                        right-hand side;
-    - u0:                       initial guess;
-    - tol:                      tolerance for stopping criterion;    
-    """
-    # initialising parameters
-    r = f - A @ u0
-    shadow_r0 = np.copy(r)
+#     - A:                        system matrix;
+#     - f:                        right-hand side;
+#     - u0:                       initial guess;
+#     - tol:                      tolerance for stopping criterion;    
+#     """
+#     # initialising parameters
+#     r = f - A @ u0
+#     shadow_r0 = np.copy(r)
 
-    previous_rho = 1
-    alpha = 1
-    omega = 1
+#     previous_rho = 1
+#     alpha = 1
+#     omega = 1
 
-    v = np.zeros_like(u0)
-    p = np.zeros_like(u0)
+#     v = np.zeros_like(u0)
+#     p = np.zeros_like(u0)
 
-    solution = u0[:]
-    f_norm = np.linalg.norm(f, 2) # precompute this so this need not happen every iteration
+#     solution = u0[:]
+#     f_norm = np.linalg.norm(f, 2) # precompute this so this need not happen every iteration
 
-    for i in range(maxits):
-        rho = np.inner(shadow_r0, r)
+#     for i in range(maxits):
+#         rho = np.inner(shadow_r0, r)
 
-        beta = (rho / previous_rho) * (alpha / omega)
+#         beta = (rho / previous_rho) * (alpha / omega)
 
-        p -= omega * v
-        p *= beta
-        p += r
+#         p -= omega * v
+#         p *= beta
+#         p += r
 
-        preconditioned_p = np.copy(p)
+#         preconditioned_p = np.copy(p)
 
-        v = A @ preconditioned_p
-        alpha = rho / np.inner(shadow_r0, v)
-        s = r - alpha * v
+#         v = A @ preconditioned_p
+#         alpha = rho / np.inner(shadow_r0, v)
+#         s = r - alpha * v
 
         
-        z = np.copy(s)
+#         z = np.copy(s)
 
-        t = A @ z
-        omega = np.inner(t, s) / np.inner(t, t)
+#         t = A @ z
+#         omega = np.inner(t, s) / np.inner(t, t)
 
-        solution += alpha * p + omega * z
-        r = s - omega * t
+#         solution += alpha * p + omega * z
+#         r = s - omega * t
         
-        if np.linalg.norm(r, 2) / f_norm < tol:
-            return solution, i+1 # return the solution and how many iterations it took for convergence
+#         if np.linalg.norm(r, 2) / f_norm < tol:
+#             return solution, i+1 # return the solution and how many iterations it took for convergence
 
-        previous_rho = np.copy(rho)
+#         previous_rho = np.copy(rho)
 
-    return solution, 0 # return the solution after the final iteration, but with a 0 indicating non-convergence
+#     return solution, 0 # return the solution after the final iteration, but with a 0 indicating non-convergence
 
 
