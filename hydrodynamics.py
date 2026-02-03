@@ -16,10 +16,10 @@ from NiFlow.utils import *
 from NiFlow.linear_solver import *
 
 
-def select_model_options(bed_bc:str = 'no_slip', veddy_viscosity_assumption:str = 'constant',
+def select_model_options(bed_bc:str = 'partial_slip', veddy_viscosity_assumption:str = 'depth-scaled&constantprofile',
                          advection_influence_matrix: np.ndarray = None, sea_boundary_treatment:str = 'exact',
-                         river_boundary_treatment:str = 'simple', surface_interaction_influence_matrix: np.ndarray = None,
-                         include_advection_surface_interactions:bool = True):
+                         river_boundary_treatment:str = 'exact', surface_interaction_influence_matrix: np.ndarray = None,
+                         include_advection_surface_interactions:bool = True, wall_boundary_condition: str = 'free_slip'):
     
     """
     
@@ -40,6 +40,7 @@ def select_model_options(bed_bc:str = 'no_slip', veddy_viscosity_assumption:str 
                                                     domain where the ramping zone is [L - L_R_river - L_BL_river, L - L_BL_river] and the boundary layer adjustment zone is [L - L_BL_river, L].
         - surface_interaction_influence_matrix:     (imax + 1) x (imax + 1) - boolean matrix where entry (i, j) indicates whether constituent i is influenced by constituent j through non-linear surface interactions (if possible).
         - include_advection_surface_interactions:   if True, then non-linear interaction between the surface and the advective forcing will be included.
+        - wall_boundary_condition:                  indicates whether a free-slip or no-slip boundary condition is used for the along-channel velocity u. Free-slip removes boundary layer. Options: 'free_slip' or 'no_slip'      
         """
     
     if bed_bc == 'partial_slip' and veddy_viscosity_assumption == 'constant':
@@ -52,7 +53,8 @@ def select_model_options(bed_bc:str = 'no_slip', veddy_viscosity_assumption:str 
             'sea_boundary_treatment': sea_boundary_treatment,
             'river_boundary_treatment': river_boundary_treatment,
             'surface_interaction_influence_matrix': surface_interaction_influence_matrix,
-            'include_advection_surface_interactions': include_advection_surface_interactions
+            'include_advection_surface_interactions': include_advection_surface_interactions,
+            'wall_boundary_condition': wall_boundary_condition
         }
     
 
@@ -339,8 +341,10 @@ class Hydrodynamics(object):
         # shorthands for long variable names
         M = self.numerical_information['M']
         imax = self.numerical_information['imax']
+
+        u_dirichlet = f"{BOUNDARY_DICT[RIVER]}" if self.model_options['wall_boundary_condition'] == 'free_slip' else f"{BOUNDARY_DICT[RIVER]}|{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}"
         
-        self.U = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[RIVER]}")  # make sure that zero-th order is not used for the free surface
+        self.U = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=u_dirichlet)  # make sure that zero-th order is not used for the free surface
         self.V = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}")
 
         # add interior bubble functions if MINI-elements are used
