@@ -5,6 +5,7 @@ import cloudpickle
 import ngsolve
 import timeit
 from contextlib import nullcontext
+from copy import deepcopy
 
 import NiFlow.truncationbasis.truncationbasis as truncationbasis
 from NiFlow.geometry.create_geometry import parametric_geometry, RIVER, SEA, WALL, WALLUP, WALLDOWN, BOUNDARY_DICT
@@ -255,8 +256,8 @@ class Hydrodynamics(object):
         # MAKE THE GEOMETRY FROM GEOMETRIC_INFORMATION
 
         if geometric_information['shape'] == 'rectangle':
-            if model_options['river_boundary_treatment'] == 'exact':
-                geomcurves = parametric_rectangle(geometric_information['shape_parameters'][0] / geometric_information['x_scaling'], 
+            # if model_options['river_boundary_treatment'] == 'exact':
+            geomcurves = parametric_rectangle(geometric_information['shape_parameters'][0] / geometric_information['x_scaling'], 
                                                 geometric_information['shape_parameters'][1] / geometric_information['y_scaling'],
                                                 geometric_information['L_BL_sea'] / geometric_information['x_scaling'],
                                                 geometric_information['L_R_sea'] / geometric_information['x_scaling'],
@@ -264,12 +265,6 @@ class Hydrodynamics(object):
                                                 geometric_information['L_BL_river'] / geometric_information['x_scaling'],
                                                 geometric_information['L_R_river'] / geometric_information['x_scaling'],
                                                 geometric_information['L_RA_river'] / geometric_information['x_scaling'])
-            elif model_options['river_boundary_treatment'] == 'simple': # ramping is done inside the domain if river_boundary_treatment is 'simple'
-                geomcurves = parametric_rectangle(geometric_information['shape_parameters'][0] / geometric_information['x_scaling'], 
-                                                geometric_information['shape_parameters'][1] / geometric_information['y_scaling'],
-                                                geometric_information['L_BL_sea'] / geometric_information['x_scaling'],
-                                                geometric_information['L_R_sea'] / geometric_information['x_scaling'],
-                                                geometric_information['L_RA_sea'] / geometric_information['x_scaling'], 0, 0, 0)
             display_geomcurves = parametric_rectangle(geometric_information['shape_parameters'][0] / geometric_information['x_scaling'], 
                                               geometric_information['shape_parameters'][1] / geometric_information['y_scaling'],
                                               0, 0, 0, 0, 0, 0) # geometry without ramping zone for postprocessing purposes
@@ -309,14 +304,13 @@ class Hydrodynamics(object):
 
         # INITIALISE FINITE ELEMENT SPACE AND TEST-/TRIALFUNCTIONS
 
-       
-
         self.solution_gf = ngsolve.GridFunction(self.femspace)
         self.restructure_solution()
 
         self.nfreedofs = count_free_dofs(self.femspace)
 
         # these are only used in the child class DecomposedHydrodynamics and are defined here to prevent exceptions
+        self.is_decomposed = False
         self.as_forcing_list = []
         self.forcing_alpha = None
         self.forcing_beta = None
@@ -481,13 +475,6 @@ class Hydrodynamics(object):
                 Q_trialfunctions[0] = trialtuple[2*M*num_time_components + 2*num_time_components]
                 river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + 2*num_time_components]
 
-                # for i in range(1, imax + 1):
-                #     Q_trialfunctions[-i] = trialtuple[2*M*num_time_components + 2*num_time_components + i]
-                #     Q_trialfunctions[i] = trialtuple[2*M*num_time_components + 2*num_time_components + imax + i]
-
-                #     river_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + 2*num_time_components + i]
-                #     river_boundary_testfunctions[i] = testtuple[2*M*num_time_components + 2*num_time_components + imax + i]
-
                 self.Q_trialfunctions = Q_trialfunctions
                 self.river_boundary_testfunctions = river_boundary_testfunctions
 
@@ -497,13 +484,6 @@ class Hydrodynamics(object):
 
                 Q_trialfunctions[0] = trialtuple[2*M*num_time_components + num_time_components]
                 river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + num_time_components]
-
-                # for i in range(1, imax + 1):
-                #     Q_trialfunctions[-i] = trialtuple[2*M*num_time_components + num_time_components + i]
-                #     Q_trialfunctions[i] = trialtuple[2*M*num_time_components + num_time_components + imax + i]
-
-                #     river_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + num_time_components + i]
-                #     river_boundary_testfunctions[i] = testtuple[2*M*num_time_components + num_time_components + imax + i]
 
                 self.Q_trialfunctions = Q_trialfunctions
                 self.river_boundary_testfunctions = river_boundary_testfunctions
@@ -517,36 +497,6 @@ class Hydrodynamics(object):
 
     # Public methods
 
-    # def setup_weak_form(self):
-    #     a_total = ngsolve.BilinearForm(self.femspace)
-
-    #     if self.model_options['sea_boundary_treatment'] == 'exact':
-    #         if self.model_options['river_boundary_treatment'] == 'exact':
-    #             weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-    #                                     self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-    #                                     self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-    #                                     self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
-    #                                     A_trialfunctions=self.A_trialfunctions, sea_boundary_testfunctions=self.sea_boundary_testfunctions,
-    #                                     Q_trialfunctions=self.Q_trialfunctions, river_boundary_testfunctions=self.river_boundary_testfunctions)
-    #         else:
-    #             weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-    #                                     self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-    #                                     self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-    #                                     self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
-    #                                     A_trialfunctions=self.A_trialfunctions, sea_boundary_testfunctions=self.sea_boundary_testfunctions)
-    #     elif self.model_options['river_boundary_treatment'] == 'exact':
-    #         weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-    #                                 self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-    #                                 self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-    #                                 self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, self.riverine_forcing.normal_alpha_y, only_linear=False,
-    #                                 Q_trialfunctions=self.Q_trialfunctions, river_boundary_testfunctions=self.river_boundary_testfunctions)
-    #     else:
-    #         weakforms.add_weak_form(a_total, self.model_options, self.numerical_information, self.geometric_information, self.constant_physical_parameters, self.spatial_parameters,
-    #                                 self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions,
-    #                                 self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions,
-    #                                 self.vertical_basis, self.time_basis, self.riverine_forcing.normal_alpha, only_linear=False)
-        
-    #     self.total_bilinearform = a_total
 
     def setup_weak_form(self, static_condensation=False):
         a_total = ngsolve.BilinearForm(self.femspace, condense=static_condensation)
@@ -783,28 +733,31 @@ def load_hydrodynamics(name, solution_format='npy'):
 class DecomposedHydrodynamics(Hydrodynamics):
 
 
-    def __init__(self, parent_hydro: Hydrodynamics, forcing: list):
-        self.model_options = parent_hydro.model_options
+    def __init__(self, parent_hydro: Hydrodynamics, forcing_instruction: dict[dict]):
+
+        self.parent_hydro = parent_hydro
+
+        self.model_options = deepcopy(parent_hydro.model_options)
         self.model_options['sea_boundary_treatment'] = 'simple' # do not use internal boundary conditions for this model; these equations are non-linear and ruin the decomposition
         self.model_options['river_boundary_treatment'] = 'simple'
 
-        self.geometric_information = parent_hydro.geometric_information # don't use internal boundary conditions.
-        self.geometric_information['L_BL_sea'] = 0
-        self.geometric_information['L_R_sea'] = 0
-        self.geometric_information['L_R_sea'] = 0
-        self.geometric_information['L_BL_river'] = 0
-        self.geometric_information['L_R_river'] = 0
-        self.geometric_information['L_R_river'] = 0
+        self.geometric_information = deepcopy(parent_hydro.geometric_information) # don't use internal boundary conditions.
+        # self.geometric_information['L_BL_sea'] = 0
+        # self.geometric_information['L_R_sea'] = 0
+        # self.geometric_information['L_R_sea'] = 0
+        # self.geometric_information['L_BL_river'] = 0
+        # self.geometric_information['L_R_river'] = 0
+        # self.geometric_information['L_R_river'] = 0
 
-        self.forcing = forcing
+        self.forcing_instruction = forcing_instruction
 
-        self.numerical_information = parent_hydro.numerical_information
-        self.constant_physical_parameters = parent_hydro.constant_physical_parameters
-        self.spatial_parameters = parent_hydro.spatial_parameters
-        self.spatial_parameters_grad = parent_hydro.spatial_parameters_grad
+        self.numerical_information = deepcopy(parent_hydro.numerical_information)
+        self.constant_physical_parameters = deepcopy(parent_hydro.constant_physical_parameters)
+        self.spatial_parameters = set_spatial_physical_parameters(self.parent_hydro.spatial_parameters['H'])
+        self.spatial_parameters_grad = get_spatial_parameter_gradients(self.spatial_parameters, self.parent_hydro.mesh)
 
-        self.geom = parent_hydro.display_geom
-        self.mesh = parent_hydro.display_mesh
+        self.geom = parent_hydro.geom
+        self.mesh = parent_hydro.mesh
 
         self.display_geom = parent_hydro.display_geom
         self.display_mesh = parent_hydro.display_mesh
@@ -818,12 +771,37 @@ class DecomposedHydrodynamics(Hydrodynamics):
         self.restructure_solution()
 
         self.nfreedofs = count_free_dofs(self.femspace)
+        self.is_decomposed = True
 
-        self.forcing_alpha = parent_hydro.alpha_solution
-        self.forcing_beta = parent_hydro.beta_solution
-        self.forcing_gamma = parent_hydro.gamma_solution
-        self.forcing_Q = parent_hydro.Q_solution
-        self.forcing_A = parent_hydro.A_solution
+        self.forcing_alpha, self.forcing_beta, self.forcing_gamma, self.forcing_Q, self.forcing_A = self.collect_forcings()
+        self.decomposition_depth = len(self.forcing_alpha)
+
+        # self.merge_depth_and_residual_setup()
+
+
+    def collect_forcings(self):
+        """Collect solutions of hydrodynamics all the way up to the non-linear model using recursion"""
+        if not self.parent_hydro.is_decomposed: # to do: make sure copies are made instead of references copied
+            forcing_alpha = [self.parent_hydro.alpha_solution]
+            forcing_beta = [self.parent_hydro.beta_solution]
+            forcing_gamma = [{l: self.parent_hydro.gamma_solution[l] for l in range(-self.parent_hydro.numerical_information['imax'], self.parent_hydro.numerical_information['imax'] + 1)}]
+            forcing_Q = [self.parent_hydro.Q_solution]
+            forcing_A = [self.parent_hydro.A_solution]
+        else:
+            forcing_alpha = [self.parent_hydro.alpha_solution] + self.parent_hydro.collect_forcings()[0]
+            forcing_beta = [self.parent_hydro.beta_solution] + self.parent_hydro.collect_forcings()[1]
+            forcing_gamma = [self.parent_hydro.gamma_solution] + self.parent_hydro.collect_forcings()[2]
+            forcing_Q = [self.parent_hydro.Q_solution] + self.parent_hydro.collect_forcings()[3]
+            forcing_A = [self.parent_hydro.A_solution] + self.parent_hydro.collect_forcings()[4]
+
+        return forcing_alpha, forcing_beta, forcing_gamma, forcing_Q, forcing_A
+    
+
+    def merge_depth_and_residual_setup(self):
+        self.spatial_parameters['H'] += self.forcing_gamma[0][0]
+        self.spatial_parameters_grad = get_spatial_parameter_gradients(self.spatial_parameters, self.mesh)
+        self.forcing_gamma[0][0] = ngsolve.CF(0)
+        self.forcing_gamma[0][0].spacedim = 2
 
 
     def setup_weak_form(self, static_condensation=True):
@@ -849,7 +827,7 @@ class DecomposedHydrodynamics(Hydrodynamics):
                                                  A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions,
                                                  sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
                                                  normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='linear_for_decomposition',
-                                                 as_forcing_list=self.forcing, forcing_alpha=self.forcing_alpha, forcing_beta=self.forcing_beta,
+                                                 forcing_instruction=self.forcing_instruction, forcing_alpha=self.forcing_alpha, forcing_beta=self.forcing_beta,
                                                  forcing_gamma=self.forcing_gamma, forcing_Q=self.forcing_Q, linear_form=rhs_total)
 
         self.total_bilinearform = a_total
@@ -857,9 +835,9 @@ class DecomposedHydrodynamics(Hydrodynamics):
 
 
     def solve(self, linear_solver='pardiso', print_log=True, num_threads=12, static_condensation=True):
-
+        """User is resposible that every DecomposedHydrodynamics leads to a linear model!"""
         if print_log:
-            print(f"Initiating solution procedure for the linear model forced by the following collection of terms: {self.forcing}. The total number of free degrees of freedom is {self.nfreedofs}.\n")
+            print(f"Initiating solution procedure for the linear model forced by the following collection of terms: {self.forcing_instruction}. The total number of free degrees of freedom is {self.nfreedofs}.\n")
 
         if num_threads > 1:
             ngsolve.SetHeapSize(200_000_000)
@@ -886,18 +864,28 @@ class DecomposedHydrodynamics(Hydrodynamics):
             print(f"Assembling weak form took {np.round(assembly_time, 3)} seconds.")
 
         # handle riverine boundary condition if the river bc is part of the forcing
-        if 'river_bc' in self.forcing: 
-            essential_bc_start = timeit.default_timer()
-            for l in range(-self.numerical_information['imax'], self.numerical_information['imax'] + 1):
-                for m in range(self.numerical_information['M']):
-                    self.solution_gf.components[m * (2*self.numerical_information['imax'] + 1)].Set(self.forcing_alpha[m][l], ngsolve.BND) # don't set on ngsolve.BND because this automatically takes the computational boundary instead of the internal boundary
+        if self.parent_hydro.model_options['river_boundary_treatment'] == 'exact':
+            self.river_interpolant = ((self.parent_hydro.geometric_information['L_BL_sea']/self.parent_hydro.geometric_information['x_scaling']) + (self.parent_hydro.geometric_information['L_R_sea']/self.parent_hydro.geometric_information['x_scaling']) + \
+                                (self.parent_hydro.geometric_information['L_RA_sea']/self.parent_hydro.geometric_information['x_scaling']) + ngsolve.x) / \
+                                ((self.parent_hydro.geometric_information['riverine_boundary_x']+self.parent_hydro.geometric_information['L_BL_river']+self.parent_hydro.geometric_information['L_R_river']+self.parent_hydro.geometric_information['L_RA_river'] +
+                                self.parent_hydro.geometric_information['L_BL_sea'] + self.parent_hydro.geometric_information['L_R_sea'] + self.parent_hydro.geometric_information['L_RA_sea']) / self.parent_hydro.geometric_information['x_scaling'])
 
-            rhs = self.total_linearform.vec.CreateVector()
-            with context:
-                rhs.data = self.total_linearform.vec - self.total_bilinearform.mat * self.solution_gf.vec
-            essential_bc_time = timeit.default_timer() - essential_bc_start
-            if print_log:
-                print(f"Handling essential BC took {np.round(essential_bc_time, 3)} seconds.")
+        if 'river_bc' in self.forcing_instruction.keys():
+            if self.forcing_instruction['river_bc']['velocity'] > 0: 
+                essential_bc_start = timeit.default_timer()
+                for m in range(self.numerical_information['M']):
+                    if self.parent_hydro.model_options['river_boundary_treatment'] == 'exact':
+                        self.solution_gf.components[m * (2*self.numerical_information['imax'] + 1)].Set(self.forcing_alpha[self.forcing_instruction['river_bc']['velocity'] - 1][m][0] +
+                                                                                                        self.forcing_Q[self.forcing_instruction['river_bc']['velocity'] - 1][0] * self.river_interpolant, ngsolve.BND)
+                    else:
+                        self.solution_gf.components[m * (2*self.numerical_information['imax'] + 1)].Set(self.parent_hydro.constant_physical_parameters['discharge'] * self.parent_hydro.riverine_forcing.normal_alpha[m], ngsolve.BND)
+
+                rhs = self.total_linearform.vec.CreateVector()
+                with context:
+                    rhs.data = self.total_linearform.vec - self.total_bilinearform.mat * self.solution_gf.vec
+                essential_bc_time = timeit.default_timer() - essential_bc_start
+                if print_log:
+                    print(f"Handling essential BC took {np.round(essential_bc_time, 3)} seconds.")
         else:
             rhs = self.total_linearform.vec.CreateVector()
             rhs.data = self.total_linearform.vec
@@ -922,9 +910,9 @@ class DecomposedHydrodynamics(Hydrodynamics):
                     ext = ngsolve.IdentityMatrix() + self.total_bilinearform.harmonic_extension
                     extT = ngsolve.IdentityMatrix() + self.total_bilinearform.harmonic_extension_trans
                     invA = ext @ invS @ extT + self.total_bilinearform.inner_solve
-                    self.solution_gf.vec.data = invA * rhs
+                    self.solution_gf.vec.data += invA * rhs
                 else:
-                    self.solution_gf.vec.data = self.total_bilinearform.mat.Inverse(freedofs=self.femspace.FreeDofs(), inverse='pardiso') * rhs
+                    self.solution_gf.vec.data += self.total_bilinearform.mat.Inverse(freedofs=self.femspace.FreeDofs(), inverse='pardiso') * rhs
         elif linear_solver == 'scipy_direct':
             solver = scipyLU_solver
             sol = solver.solve(mat, rhs_arr, rcm=True)

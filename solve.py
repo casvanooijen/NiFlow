@@ -6,7 +6,6 @@ import timeit
 import ngsolve
 import copy
 import matplotlib.pyplot as plt
-import pypardiso
 from contextlib import nullcontext
 
 from NiFlow.hydrodynamics import *
@@ -54,7 +53,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
 
     # set options for parallel computation
     if num_threads > 1:
-        ngsolve.SetHeapSize(100_000_000)
+        ngsolve.SetHeapSize(200_000_000)
         ngsolve.SetNumThreads(num_threads)
 
     context = ngsolve.TaskManager() if num_threads > 1 else nullcontext()
@@ -81,11 +80,11 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q].Set(hydro.seaward_forcing.amplitudes[q]*np.cos(hydro.seaward_forcing.phases[q-1])) 
 
         # river discharge
-    if hydro.model_options['river_boundary_treatment'] != 'exact':
-        for m in range(M):
-            sol.components[m * (2*imax + 1)].Set(hydro.constant_physical_parameters['discharge'] * hydro.riverine_forcing.normal_alpha[m], ngsolve.BND)
+    # if hydro.model_options['river_boundary_treatment'] != 'exact':
+    for m in range(M): # do this always.
+        sol.components[m * (2*imax + 1)].Set(hydro.constant_physical_parameters['discharge'] * hydro.riverine_forcing.normal_alpha[m], ngsolve.BND)
             
-    hydro.solution_gf = sol
+    hydro.solution_gf = sol 
 
     # Save true values of advection_epsilon and Av before modifying them in the continuation (homology) method
 
@@ -207,16 +206,16 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                         ext = ngsolve.IdentityMatrix() + a.harmonic_extension
                         extT = ngsolve.IdentityMatrix() + a.harmonic_extension_trans
                         invA = ext @ invS @ extT + a.inner_solve
-                        du.vec.data = invA * rhs
+                        du.vec.data += invA * rhs
                         # for testing static condensation
                         if print_log: 
                             dof_types = dof_division(hydro.femspace)
                             for ctype in dof_types.keys():
                                 if str(ctype) == "COUPLING_TYPE.LOCAL_DOF":
                                     num_local_dofs = dof_types[ctype]
-                        print(f"    Number of effective degrees of freedom (non-local dofs) equal to {hydro.nfreedofs - num_local_dofs}.")
+                            print(f"    Number of effective degrees of freedom (non-local dofs) equal to {hydro.nfreedofs - num_local_dofs}.")
                     else:
-                        du.vec.data = a.mat.Inverse(freedofs=hydro.femspace.FreeDofs(), inverse='pardiso') * rhs
+                        du.vec.data += a.mat.Inverse(freedofs=hydro.femspace.FreeDofs(), inverse='pardiso') * rhs
 
             elif linear_solver == 'scipy_direct':
                 solver = scipyLU_solver
@@ -451,69 +450,3 @@ def compile_previous_newton_iterate(hydro: Hydrodynamics):
         for m in range(hydro.numerical_information['M']):
             hydro.alpha_solution[m][i].Compile()
             hydro.beta_solution[m][i].Compile()
-
-
-
-# Linear solvers
-
-
-# def bicgstab(A, f, u0, tol=1e-12, maxits = 500):
-#     """Carries out a Bi-CGSTAB solver based on the pseudocode in Van der Vorst (1992). This function has the option for a
-#     reduced basis preconditioner if reduced_A and transition_mass_matrix are specified. Returns the solution and an exitcode
-#     indicating how many iterations it took for convergence. If exitcode=0 is returned, then the method did not converge.
-#     This implementation is heavily based on the scipy-implementation that can be found on https://github.com/scipy/scipy/blob/main/scipy/sparse/linalg/_isolve/iterative.py.
-#     The function is also included in this file, so that the reduced-basis preconditioner can be used.
-    
-#     Arguments:
-    
-#     - A:                        system matrix;
-#     - f:                        right-hand side;
-#     - u0:                       initial guess;
-#     - tol:                      tolerance for stopping criterion;    
-#     """
-#     # initialising parameters
-#     r = f - A @ u0
-#     shadow_r0 = np.copy(r)
-
-#     previous_rho = 1
-#     alpha = 1
-#     omega = 1
-
-#     v = np.zeros_like(u0)
-#     p = np.zeros_like(u0)
-
-#     solution = u0[:]
-#     f_norm = np.linalg.norm(f, 2) # precompute this so this need not happen every iteration
-
-#     for i in range(maxits):
-#         rho = np.inner(shadow_r0, r)
-
-#         beta = (rho / previous_rho) * (alpha / omega)
-
-#         p -= omega * v
-#         p *= beta
-#         p += r
-
-#         preconditioned_p = np.copy(p)
-
-#         v = A @ preconditioned_p
-#         alpha = rho / np.inner(shadow_r0, v)
-#         s = r - alpha * v
-
-        
-#         z = np.copy(s)
-
-#         t = A @ z
-#         omega = np.inner(t, s) / np.inner(t, t)
-
-#         solution += alpha * p + omega * z
-#         r = s - omega * t
-        
-#         if np.linalg.norm(r, 2) / f_norm < tol:
-#             return solution, i+1 # return the solution and how many iterations it took for convergence
-
-#         previous_rho = np.copy(rho)
-
-#     return solution, 0 # return the solution after the final iteration, but with a 0 indicating non-convergence
-
-
