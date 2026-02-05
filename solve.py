@@ -53,7 +53,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
 
     # set options for parallel computation
     if num_threads > 1:
-        ngsolve.SetHeapSize(200_000_000)
+        ngsolve.SetHeapSize(500_000_000)
         ngsolve.SetNumThreads(num_threads)
 
     context = ngsolve.TaskManager() if num_threads > 1 else nullcontext()
@@ -144,7 +144,8 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                                             hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
                                                             A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions, Q0 = Q0,
                                                             sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
-                                                            normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full', oseen_linearisation=oseen_linearisation)
+                                                            normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full', oseen_linearisation=oseen_linearisation,
+                                                            forcing_instruction=hydro.forcing_instruction)
 
 
             forms_time = timeit.default_timer() - forms_start

@@ -230,7 +230,7 @@ class Hydrodynamics(object):
     """
 
     def __init__(self, model_options: dict, geometric_information: dict, numerical_information: dict,
-                 constant_physical_parameters: dict, spatial_physical_parameters: dict):
+                 constant_physical_parameters: dict, spatial_physical_parameters: dict, forcing_instruction: dict = None):
         
         """Creates Hydrodynamics object from chosen parameters/processes
 
@@ -311,6 +311,7 @@ class Hydrodynamics(object):
 
         self.nfreedofs = count_free_dofs(self.femspace)
 
+        self.forcing_instruction = forcing_instruction
         # these are only used in the child class DecomposedHydrodynamics and are defined here to prevent exceptions
         self.is_decomposed = False
         self.as_forcing_list = []
@@ -525,7 +526,7 @@ class Hydrodynamics(object):
                                                  sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
                                                  normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full',
                                                  as_forcing_list=[], forcing_alpha=self.forcing_alpha, forcing_beta=self.forcing_beta,
-                                                 forcing_gamma=self.forcing_gamma, forcing_Q=self.forcing_Q)
+                                                 forcing_gamma=self.forcing_gamma, forcing_Q=self.forcing_Q, forcing_instruction=self.forcing_instruction)
 
         self.total_bilinearform = a_total
 

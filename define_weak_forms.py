@@ -46,14 +46,14 @@ def construct_non_linear_weak_form(weak_form, model_options, geometric_informati
 def construct_linearised_weak_form(weak_form, model_options, geometric_information, numerical_information, constant_parameters, spatial_parameters, spatial_parameters_grad,
                                    time_basis, vertical_basis, alpha_trial_functions, alpha0, beta_trial_functions, beta0, gamma_trial_functions, gamma0,
                                    umom_test_functions, vmom_test_functions, DIC_test_functions, A_trial_functions=None, Q_trial_functions=None, Q0=None,
-                                   sea_bc_test_functions=None, river_bc_test_functions=None, normal_alpha=None, normal_alpha_y=None, operator='full', oseen_linearisation=False):
+                                   sea_bc_test_functions=None, river_bc_test_functions=None, normal_alpha=None, normal_alpha_y=None, operator='full', oseen_linearisation=False, forcing_instruction=None):
     
     constructor = WeakFormConstructor(weak_form, model_options, geometric_information, numerical_information, constant_parameters, spatial_parameters, spatial_parameters_grad, 
                                       time_basis, vertical_basis, alpha_trial_functions, beta_trial_functions, gamma_trial_functions,
                                       umom_test_functions, vmom_test_functions, DIC_test_functions, alpha0=alpha0, beta0=beta0, gamma0=gamma0, A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions,
                                       sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions, 
                                       normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator=operator,
-                                      as_forcing_list=[], forcing_instruction=None, forcing_alpha=None, forcing_beta=None, forcing_gamma=None, forcing_Q=None, oseen_linearisation=oseen_linearisation)
+                                      as_forcing_list=[], forcing_instruction=forcing_instruction, forcing_alpha=None, forcing_beta=None, forcing_gamma=None, forcing_Q=None, oseen_linearisation=oseen_linearisation)
     
     constructor.add_momentum_equation_linearised(equation='u', Q0=Q0)
     constructor.add_momentum_equation_linearised(equation='v', Q0=Q0)
