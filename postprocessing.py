@@ -475,7 +475,7 @@ class HydroPlot(object):
 
     # Fundamental plotting functions
 
-    def add_topview_plot(self, title, exclude_ramping_zone=True, colormap_quantity=None, cmap='RdBu', center_range=True, clabel='Color [unit]', contours=True, refinement_level=3, vectorfield_quantity=None, num_arrows:tuple=(30,30), arrow_color='k', length_indication='alpha', **kwargs):
+    def add_topview_plot(self, title, exclude_ramping_zone=True, colormap_quantity=None, cmap='RdBu', center_range=True, clabel='Color [unit]', contours=True, refinement_level=3, vectorfield_quantity=None, num_arrows:tuple=(30,30), arrow_color='k', length_indication='alpha', xlim=(None, None), ylim=(None, None), **kwargs):
         x_scaling = self.hydro.geometric_information['x_scaling']
         y_scaling = self.hydro.geometric_information['y_scaling']
         
@@ -598,10 +598,13 @@ class HydroPlot(object):
 
         current_ax.set_xlabel('x [km]')
         current_ax.set_ylabel('y [km]')
+
+        current_ax.set_xlim(xlim[0], xlim[1])
+        current_ax.set_ylim(ylim[0], ylim[1])
         self.plot_counter += 1
 
 
-    def add_cross_section_plot(self, title, x, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', spacing='equal', **kwargs):
+    def add_cross_section_plot(self, title, x, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', spacing='equal', xlim=(None, None), ylim=(None, None), **kwargs):
         if self.num_figures == (1, 1):
             current_ax = self.ax
         elif self.num_figures[0] == 1 or self.num_figures[1] == 1:
@@ -723,12 +726,15 @@ class HydroPlot(object):
         ticklabels_string = [str(np.round(tick, 3))[:4] if tick >= 0 else str(np.round(tick, 3))[:5] for tick in ticklabels]
         current_ax.set_xticklabels(ticklabels_string)
 
+        current_ax.set_xlim(xlim[0], xlim[1])
+        current_ax.set_ylim(ylim[0], ylim[1])
+
         current_ax.set_xlabel('y [km]')
         current_ax.set_ylabel('-Depth [m]')
         self.plot_counter += 1
 
 
-    def add_2DV_plot(self, title, y, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', spacing='equal', **kwargs):
+    def add_2DV_plot(self, title, y, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', spacing='equal', xlim=(None, None), ylim=(None, None), **kwargs):
         if self.num_figures == (1, 1):
             current_ax = self.ax
         elif self.num_figures[0] == 1 or self.num_figures[1] == 1:
@@ -847,6 +853,9 @@ class HydroPlot(object):
         ticklabels = list(np.round(np.linspace(0, 1, 10), 3) * x_scaling / 1000)
         ticklabels_string = [str(np.round(tick, 3))[:4] if tick >= 0 else str(np.round(tick, 3))[:5] for tick in ticklabels]
         current_ax.set_xticklabels(ticklabels_string)
+
+        current_ax.set_xlim(xlim[0], xlim[1])
+        current_ax.set_ylim(ylim[0], ylim[1])
 
         current_ax.set_xlabel('x [km]')
         current_ax.set_ylabel('-Depth [m]')
