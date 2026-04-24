@@ -111,7 +111,9 @@ class WeakFormConstructor(object):
         self.oseen_linearisation = oseen_linearisation
 
         self.M = numerical_information['M']
-        self.imax = numerical_information['imax']
+        # self.imax = numerical_information['imax']
+        self.time_indices = numerical_information['constituent_indices']
+        self.fourier_indices = constituent_indices_to_fourier_indices(self.time_indices)
 
         self.alpha = alpha_trial_functions
         self.beta = beta_trial_functions
@@ -128,13 +130,14 @@ class WeakFormConstructor(object):
             self.beta0_grad = [{} for _ in range(self.M)]
             self.gamma0_grad = {}
 
-            for i in range(-self.imax, self.imax + 1):
+            for i in self.fourier_indices:
                 self.gamma0_grad[i] = ngsolve.grad(self.gamma0[i])
                 for m in range(self.M):
                     self.alpha0_grad[m][i] = ngsolve.grad(self.alpha0[m][i])
                     self.beta0_grad[m][i] = ngsolve.grad(self.beta0[m][i])
 
-            for i in range(-self.imax, self.imax + 1):
+
+            for i in self.fourier_indices:
                 self.gamma0_grad[i][0].Compile()
                 self.gamma0_grad[i][1].Compile()
                 for m in range(self.M):
@@ -267,8 +270,8 @@ class WeakFormConstructor(object):
 
         # Construct the functions that make sure the computational boundary conditions are actually satisfied
         if self.internal_sea_bc:
-            self.sea_bc_trial_functions = {l: self.A[l] * self.sea_interpolant for l in range(-self.imax, self.imax + 1)}
-            self.sea_bc_trial_functions_x = {l: self.A[l] * self.sea_interpolant_x for l in range(-self.imax, self.imax + 1)}
+            self.sea_bc_trial_functions = {l: self.A[l] * self.sea_interpolant for l in self.fourier_indices}
+            self.sea_bc_trial_functions_x = {l: self.A[l] * self.sea_interpolant_x for l in self.fourier_indices}
 
         if self.internal_river_bc:
             self.river_bc_trial_functions = [{0: self.Q[0] * self.river_interpolant} for m in range(self.M)]
@@ -444,9 +447,9 @@ class WeakFormConstructor(object):
         eps = self.constant_parameters['surface_epsilon']
 
         for m in range(self.M):
-            for i in range(-self.imax, self.imax + 1):
-                for j in range(-self.imax, self.imax + 1):
-                    if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)]:
+            for i in self.fourier_indices:
+                for j in self.fourier_indices:
+                    if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                         self.add_double_product_horizontal_derivative(eps * self.ramp * H3(i, j, l) * G4(m), 0, alpha[m][j], gamma[i], self.DIC_test_functions[l], side) # product rule: (gamma * alpha)_x = gamma_x * alpha + gamma * alpha_x
                         self.add_double_product_horizontal_derivative(eps * self.ramp * H3(i, j, l) * G4(m), 0, gamma[i], alpha[m][j], self.DIC_test_functions[l], side)
 
@@ -470,9 +473,9 @@ class WeakFormConstructor(object):
             river_bc_coef_0_x = [{0: Q0[0] * self.river_interpolant_x} for m in range(self.M)]
 
         for m in range(self.M):
-            for i in range(-self.imax, self.imax + 1):
-                for j in range(-self.imax, self.imax + 1):
-                    if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)]:
+            for i in self.fourier_indices:
+                for j in self.fourier_indices:
+                    if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                         self.add_double_product_horizontal_derivative_linearised(eps * self.ramp * H3(i, j, l) * G4(m), 0, self.alpha[m][j], self.alpha0[m][j], self.gamma[i], self.gamma0[i], self.gamma0_grad[i], self.DIC_test_functions[l]) # product rule: (gamma * alpha)_x = gamma_x * alpha + gamma * alpha_x
                         self.add_double_product_horizontal_derivative_linearised(eps * self.ramp * H3(i, j, l) * G4(m), 0, self.gamma[i], self.gamma0[i], self.alpha[m][j], self.alpha0[m][j], self.alpha0_grad[m][j], self.DIC_test_functions[l])
 
@@ -514,7 +517,7 @@ class WeakFormConstructor(object):
         self.add_time_derivative(proj_coef * H * sigma, flow_variable[p][l], flow_variable[p][-l], test_function[p][l], test_function[p][-l], side)
 
 
-    def add_time_derivative_surface_interactions(self, p: int, l: int, equation = 'u', forcing={'surface': 0, 'velocity':0}):
+    def add_time_derivative_surface_interactions(self, p: int, l: int, enum_l: int, equation = 'u', forcing={'surface': 0, 'velocity':0}):
         """l must be a positive integer!"""
         
         alpha = self.forcing_alpha[forcing['velocity'] - 1] if forcing['velocity'] > 0 else self.alpha
@@ -534,9 +537,9 @@ class WeakFormConstructor(object):
         flow_variable = alpha if equation == 'u' else beta
         test_function = self.umom_test_functions if equation == 'u' else self.vmom_test_functions
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[l, abs(i)] and self.surface_matrix[l, abs(j)]:
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                     if self.internal_river_bc and equation == 'u' and i == 0:
                         self.add_double_product(eps * self.ramp * sigma * vertical_proj_coef * H4(i,j,-l), flow_variable[p][i] + river_bc_coef[p][i], gamma[j], test_function[p][-l], side)
                         self.add_double_product(eps * self.ramp * sigma * vertical_proj_coef * H4(i,j,l), flow_variable[p][i] + river_bc_coef[p][i], gamma[j], test_function[p][l], side)
@@ -545,7 +548,7 @@ class WeakFormConstructor(object):
                         self.add_double_product(eps * self.ramp * sigma * vertical_proj_coef * H4(i,j,l), flow_variable[p][i], gamma[j], test_function[p][l], side)
 
 
-    def add_time_derivative_surface_interactions_linearised(self, p: int, l: int, equation='u', Q0=None):
+    def add_time_derivative_surface_interactions_linearised(self, p: int, l: int, enum_l:int, equation='u', Q0=None):
         eps = self.constant_parameters['surface_epsilon']
         sigma = self.constant_parameters['sigma']
 
@@ -560,9 +563,9 @@ class WeakFormConstructor(object):
             # river_bc_coef_0 = [{0: Q0[0] * self.normal_alpha[m] * self.river_interpolant} for m in range(self.M)]
             river_bc_coef_0 = [{0: Q0[0] * self.river_interpolant} for m in range(self.M)]
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[l, abs(i)] and self.surface_matrix[l, abs(j)]:
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                     if self.internal_river_bc and equation == 'u' and i == 0:
                         self.add_double_product_linearised(eps * self.ramp * sigma * vertical_proj_coef * H4(i,j,-l), flow_variable[p][i] + self.river_bc_trial_functions[p][i], flow_variable_0[p][i] + river_bc_coef_0[p][i],
                                                             self.gamma[j], self.gamma0[j], test_function[p][-l])
@@ -614,9 +617,9 @@ class WeakFormConstructor(object):
         H3_is_zero = self.time_basis.tensor_dict['H3_iszero']
         vertical_proj_coef = self.vertical_basis.inner_product(p, p) # only vertical projection coefficient; time-projection coefficient changes for every combination (i, j)
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and not H3_is_zero(i,j,l):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and not H3_is_zero(i,j,l):
                     self.add_double_product(H3(i, j, l) * self.ramp * vertical_proj_coef * parameter * eps, gamma[i], flow_variable[p][j], test_function, side)
 
                     if self.internal_river_bc and equation == 'v' and j == 0:
@@ -638,9 +641,9 @@ class WeakFormConstructor(object):
         H3_is_zero = self.time_basis.tensor_dict['H3_iszero']
         vertical_proj_coef = self.vertical_basis.inner_product(p, p) # only vertical projection coefficient; time-projection coefficient changes for every combination (i, j)
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and not H3_is_zero(i,j,l):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and not H3_is_zero(i,j,l):
                     self.add_double_product_linearised(H3(i, j, l) * self.ramp * vertical_proj_coef * parameter * eps, self.gamma[i], self.gamma0[i], flow_variable[p][j], flow_variable_0[p][j], test_function)
 
                     if self.internal_river_bc and equation == 'v' and j == 0:
@@ -687,11 +690,11 @@ class WeakFormConstructor(object):
             self.add_boundary_forcing(-g * H * proj_coef * 1/self.x_scaling * self.A[l], test_function, BOUNDARY_DICT[SEA], side)
         elif forcing['surface'] == 0:
             if l > 0:
-                A = self.constant_parameters['seaward_amplitudes'][l] * ngsolve.cos(self.constant_parameters['seaward_phases'][l-1])
+                A = self.constant_parameters['seaward_amplitudes'][self.time_indices.index(l)] * ngsolve.cos(self.constant_parameters['seaward_phases'][self.time_indices.index(l) - int(0 in self.time_indices)])
             elif l == 0:
                 A = self.constant_parameters['seaward_amplitudes'][0]
             else:
-                A = -self.constant_parameters['seaward_amplitudes'][l] * ngsolve.sin(self.constant_parameters['seaward_phases'][l-1])
+                A = -self.constant_parameters['seaward_amplitudes'][self.time_indices.index(abs(l))] * ngsolve.sin(self.constant_parameters['seaward_phases'][self.time_indices.index(abs(l)) - int(0 in self.time_indices)])
             
             self.add_boundary_forcing(-g * H * 1/self.x_scaling * proj_coef * A, test_function, BOUNDARY_DICT[SEA], side)
         else:
@@ -715,9 +718,9 @@ class WeakFormConstructor(object):
 
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and not H3_is_zero(i,j,l):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and not H3_is_zero(i,j,l):
                     self.add_double_product_horizontal_derivative(g * eps * self.ramp * vertical_proj_coef * H3(i, j, l), direction, gamma1[i], gamma2[j], test_function, side)
 
     
@@ -732,9 +735,9 @@ class WeakFormConstructor(object):
 
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and not H3_is_zero(i,j,l):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and not H3_is_zero(i,j,l):
                     self.add_double_product_horizontal_derivative_linearised(g * eps * self.ramp * vertical_proj_coef * H3(i, j, l), direction, self.gamma[i], self.gamma0[i], self.gamma[j], self.gamma0[j], self.gamma0_grad[j], test_function)
 
 
@@ -776,13 +779,13 @@ class WeakFormConstructor(object):
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
 
         # linear surface interaction 2 * H * zeta
-        if self.surface_matrix[abs(l), abs(l)]: 
+        if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(l))]: 
             self.add_forcing(vertical_proj_coef * eps * H * density_gradient * gamma[l], test_function, side)
 
         # non-linear surface interaction zeta**2
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)]:
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                     self.add_double_product(eps * self.ramp * vertical_proj_coef * H3(i,j,l) * density_gradient, gamma[i], gamma[j], test_function, side)
 
 
@@ -799,13 +802,13 @@ class WeakFormConstructor(object):
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
 
         # linear surface interaction 2 * H * zeta; unchanged here in linearisation because already linear
-        if self.surface_matrix[abs(l), abs(l)]: 
+        if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(l))]: 
             self.add_forcing(vertical_proj_coef * eps * H * density_gradient * self.gamma[l], test_function)
 
         # non-linear surface interaction zeta**2
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)]:
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                     self.add_double_product_linearised(eps * self.ramp * vertical_proj_coef * H3(i, j, l) * density_gradient, self.gamma[i], self.gamma0[i], self.gamma[j], self.gamma0[j], test_function)
 
 
@@ -877,17 +880,18 @@ class WeakFormConstructor(object):
         if self.internal_river_bc:
             river_bc_coef_x = self.forcing_river_bc_trial_functions_x[forcing['velocity'] - 1] if forcing['velocity'] > 0 else self.river_bc_trial_functions_x
 
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                proj_coef = self.vertical_basis.inner_product(p, p) * H3(i, j, l)
-                self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 0, gamma[i], flow_variable[p][j], test_function, side)
-                self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 0, test_function, flow_variable[p][j], gamma[i], side)
-                self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 1, gamma[i], flow_variable[p][j], test_function, side)
-                self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 1, test_function, flow_variable[p][j], gamma[i], side)
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
+                    proj_coef = self.vertical_basis.inner_product(p, p) * H3(i, j, l)
+                    self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 0, gamma[i], flow_variable[p][j], test_function, side)
+                    self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 0, test_function, flow_variable[p][j], gamma[i], side)
+                    self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 1, gamma[i], flow_variable[p][j], test_function, side)
+                    self.add_double_product_horizontal_second_derivative(eps * self.ramp * proj_coef * Ah, 1, test_function, flow_variable[p][j], gamma[i], side)
 
-                if self.internal_river_bc and equation == 'u' and j == 0:
-                    self.add_double_product_horizontal_derivative(eps * self.ramp * proj_coef * Ah, 0, gamma[i], test_function, river_bc_coef_x[p][j], side)
-                    self.add_double_product_horizontal_derivative(eps * self.ramp * proj_coef * Ah, 0, river_bc_coef_x[p][j], gamma[i], test_function, side)
+                    if self.internal_river_bc and equation == 'u' and j == 0:
+                        self.add_double_product_horizontal_derivative(eps * self.ramp * proj_coef * Ah, 0, gamma[i], test_function, river_bc_coef_x[p][j], side)
+                        self.add_double_product_horizontal_derivative(eps * self.ramp * proj_coef * Ah, 0, river_bc_coef_x[p][j], gamma[i], test_function, side)
 
 
     def add_horizontal_eddy_viscosity_surface_interactions_linearised(self, p: int, l: int, equation='u', Q0=None):
@@ -903,20 +907,21 @@ class WeakFormConstructor(object):
         if self.internal_river_bc:
             river_bc_coef_0_x = [{0: Q0[0] * self.river_interpolant_x} for m in range(self.M)]
         
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                proj_coef = self.vertical_basis.inner_product(p, p) * H3(i, j, l)
-                self.add_double_product_horizontal_second_derivative_linearised(eps * self.ramp * proj_coef * Ah, 0, self.gamma[i], self.gamma0[i], flow_variable[p][j], flow_variable_0[p][j], flow_variable_0_grad[p][j], test_function)
-                self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * ngsolve.grad(flow_variable[p][j])[0] * self.gamma0_grad[i][0] / self.x_scaling**2 * ngsolve.dx
-                self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * flow_variable_0_grad[p][j][0] * ngsolve.grad(self.gamma[i])[0] / self.x_scaling**2 * ngsolve.dx
-                self.add_double_product_horizontal_second_derivative_linearised(eps * self.ramp * proj_coef * Ah, 1, self.gamma[i], self.gamma0[i], flow_variable[p][j], flow_variable_0[p][j], flow_variable_0_grad[p][j], test_function)
-                self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * ngsolve.grad(flow_variable[p][j])[1] * self.gamma0_grad[i][1] / self.y_scaling**2 * ngsolve.dx
-                self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * flow_variable_0_grad[p][j][1] * ngsolve.grad(self.gamma[i])[1] / self.y_scaling**2 * ngsolve.dx
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
+                    proj_coef = self.vertical_basis.inner_product(p, p) * H3(i, j, l)
+                    self.add_double_product_horizontal_second_derivative_linearised(eps * self.ramp * proj_coef * Ah, 0, self.gamma[i], self.gamma0[i], flow_variable[p][j], flow_variable_0[p][j], flow_variable_0_grad[p][j], test_function)
+                    self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * ngsolve.grad(flow_variable[p][j])[0] * self.gamma0_grad[i][0] / self.x_scaling**2 * ngsolve.dx
+                    self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * flow_variable_0_grad[p][j][0] * ngsolve.grad(self.gamma[i])[0] / self.x_scaling**2 * ngsolve.dx
+                    self.add_double_product_horizontal_second_derivative_linearised(eps * self.ramp * proj_coef * Ah, 1, self.gamma[i], self.gamma0[i], flow_variable[p][j], flow_variable_0[p][j], flow_variable_0_grad[p][j], test_function)
+                    self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * ngsolve.grad(flow_variable[p][j])[1] * self.gamma0_grad[i][1] / self.y_scaling**2 * ngsolve.dx
+                    self.weak_form += eps * self.ramp * proj_coef * Ah * test_function * flow_variable_0_grad[p][j][1] * ngsolve.grad(self.gamma[i])[1] / self.y_scaling**2 * ngsolve.dx
 
-                if self.internal_river_bc and equation == 'u' and j == 0:
-                    self.add_double_product_horizontal_derivative_linearised(eps * self.ramp * proj_coef * Ah, 0, self.river_bc_trial_functions_x[p][j], river_bc_coef_0_x[p][j], self.gamma[i], self.gamma0[i], self.gamma0_grad[i], test_function)
-                    self.weak_form += eps * self.ramp * proj_coef * Ah * self.gamma[i] * river_bc_coef_0_x[p][j] * ngsolve.grad(test_function)[0] / self.x_scaling * ngsolve.dx
-                    self.weak_form += eps * self.ramp * proj_coef * Ah * self.gamma0[i] * self.river_bc_trial_functions_x[p][j] * ngsolve.grad(test_function)[0] / self.x_scaling * ngsolve.dx        
+                    if self.internal_river_bc and equation == 'u' and j == 0:
+                        self.add_double_product_horizontal_derivative_linearised(eps * self.ramp * proj_coef * Ah, 0, self.river_bc_trial_functions_x[p][j], river_bc_coef_0_x[p][j], self.gamma[i], self.gamma0[i], self.gamma0_grad[i], test_function)
+                        self.weak_form += eps * self.ramp * proj_coef * Ah * self.gamma[i] * river_bc_coef_0_x[p][j] * ngsolve.grad(test_function)[0] / self.x_scaling * ngsolve.dx
+                        self.weak_form += eps * self.ramp * proj_coef * Ah * self.gamma0[i] * self.river_bc_trial_functions_x[p][j] * ngsolve.grad(test_function)[0] / self.x_scaling * ngsolve.dx        
 
 
     def add_momentum_advection(self, p: int, l: int, equation='u', forcing={'surface': 0, 'velocity':0}):
@@ -945,9 +950,9 @@ class WeakFormConstructor(object):
         flow_variable = alpha if equation == 'u' else beta
 
         
-        for i in range(-self.imax, self.imax+1):
-            for j in range(-self.imax, self.imax+1):
-                if self.advection_matrix[abs(l), abs(i)] and self.advection_matrix[abs(l), abs(j)] and not H3_is_zero(i,j,l):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and not H3_is_zero(i,j,l):
                     # do not add a zero term if the projection coefficient vanishes; this takes a lot of unnecessary computational effort
                     for m in range(self.M):
                         for n in range(self.M):
@@ -1016,9 +1021,9 @@ class WeakFormConstructor(object):
             river_bc_coef_0_x = [{0: Q0[0] * self.river_interpolant_x} for m in range(self.M)]
             river_bc_coef_0_y = [{0: 0} for m in range(self.M)]
 
-        for i in range(-self.imax, self.imax+1):
-            for j in range(-self.imax, self.imax+1):
-                if self.advection_matrix[abs(l), abs(i)] and self.advection_matrix[abs(l), abs(j)] and not H3_is_zero(i,j,l):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                if self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and not H3_is_zero(i,j,l):
                     # do not add a zero term if the projection coefficient vanishes; this takes a lot of unnecessary computational effort
                     for m in range(self.M):
                         for n in range(self.M):
@@ -1100,20 +1105,20 @@ class WeakFormConstructor(object):
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
         
         # surface interactions with double products
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
                 for m in range(self.M):
-                    if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and self.advection_matrix[abs(l), abs(i)] and self.advection_matrix[abs(l), abs(j)]:
+                    if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                         proj_coef = H4(i, j, l) * G7(m, p)
                         self.add_double_product(-surface_eps * advection_eps * self.ramp * proj_coef * sigma, gamma[i], flow_variable[m][j], test_function, side)
                         if self.internal_river_bc and equation == 'u' and j == 0:
                             self.add_double_product(-surface_eps * advection_eps * self.ramp * proj_coef * sigma, gamma[i], river_bc_coef[m][j], test_function, side)
 
         # surface interactions with triple products
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                for k in range(-self.imax, self.imax + 1):
-                    if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and self.surface_matrix[abs(l), abs(k)] and self.advection_matrix[abs(l), abs(i)] and self.advection_matrix[abs(l), abs(j)]:
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                for k in self.fourier_indices:
+                    if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(k))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                         time_proj_coef = H5(i,j,k,l)
                         for m in range(self.M):
                             for n in range(self.M): 
@@ -1205,10 +1210,10 @@ class WeakFormConstructor(object):
         
 
         # double product interactions
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
                 for m in range(self.M):
-                    if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and self.advection_matrix[abs(l), abs(i)] and self.advection_matrix[abs(l), abs(j)]:
+                    if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                         proj_coef = H4(i, j, l) * G7(m, p)
                         self.add_double_product_linearised(-surface_eps * advection_eps * self.ramp * proj_coef * sigma, self.gamma[i], self.gamma0[i], flow_variable[m][j], flow_variable_0[m][j], test_function)
                         if self.internal_river_bc and equation == 'u':
@@ -1216,10 +1221,10 @@ class WeakFormConstructor(object):
 
 
         # triple product interactions
-        for i in range(-self.imax, self.imax + 1):
-            for j in range(-self.imax, self.imax + 1):
-                for k in range(-self.imax, self.imax + 1):
-                    if self.surface_matrix[abs(l), abs(i)] and self.surface_matrix[abs(l), abs(j)] and self.surface_matrix[abs(l), abs(k)] and self.advection_matrix[abs(l), abs(i)] and self.advection_matrix[abs(l), abs(j)]:
+        for i in self.fourier_indices:
+            for j in self.fourier_indices:
+                for k in self.fourier_indices:
+                    if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))] and self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(k))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(i))] and self.advection_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(j))]:
                         time_proj_coef = H5(i,j,k,l)
                         for m in range(self.M):
                             for n in range(self.M):  
@@ -1321,13 +1326,14 @@ class WeakFormConstructor(object):
     def add_depth_integrated_continuity_equation(self):
         """"""
 
-        if 'transport_divergence' in self.forcing_instruction.keys():
-            self.add_transport_divergence(0, forcing=self.forcing_instruction['transport_divergence'])
+        if 0 in self.time_indices:
+            if 'transport_divergence' in self.forcing_instruction.keys():
+                self.add_transport_divergence(0, forcing=self.forcing_instruction['transport_divergence'])
 
-        if self.surface_in_sigma and 'Stokes_transport_divergence' in self.forcing_instruction.keys():
-            self.add_stokes_transport(0, forcing=self.forcing_instruction['Stokes_transport_divergence'])
+            if self.surface_in_sigma and 'Stokes_transport_divergence' in self.forcing_instruction.keys():
+                self.add_stokes_transport(0, forcing=self.forcing_instruction['Stokes_transport_divergence'])
 
-        for l in range(1, self.imax + 1):
+        for l in self.time_indices[int(0 in self.time_indices):]:
             if 'DIC_time_derivative' in self.forcing_instruction.keys():
                 self.add_DIC_time_derivative(l, forcing=self.forcing_instruction['DIC_time_derivative'])
 
@@ -1343,13 +1349,14 @@ class WeakFormConstructor(object):
     def add_depth_integrated_continuity_equation_linearised(self, Q0=None):
         """ """
 
-        if 'transport_divergence' in self.forcing_instruction.keys():
-            self.add_transport_divergence(0)
+        if 0 in self.time_indices:
+            if 'transport_divergence' in self.forcing_instruction.keys():
+                self.add_transport_divergence(0)
 
-        if self.surface_in_sigma and 'Stokes_transport_divergence' in self.forcing_instruction.keys():
-            self.add_stokes_transport_linearised(0, Q0=Q0)
+            if self.surface_in_sigma and 'Stokes_transport_divergence' in self.forcing_instruction.keys():
+                self.add_stokes_transport_linearised(0, Q0=Q0)
 
-        for l in range(1, self.imax + 1):
+        for l in self.time_indices[int(0 in self.time_indices):]:
             if 'DIC_time_derivative' in self.forcing_instruction.keys():
                 self.add_DIC_time_derivative(l)
 
@@ -1371,12 +1378,12 @@ class WeakFormConstructor(object):
         dirac_delta_sea = ngsolve.IfPos((ngsolve.x - dirac_delta_width/2) * (-dirac_delta_width/2 - ngsolve.x),
                                         (4/(dirac_delta_width**2)) * (dirac_delta_width / 2 - ngsolve.sqrt((ngsolve.x)**2)),
                                         0) # Hat function Dirac Delta
-        
-        self.add_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
-        self.add_forcing(-amplitudes[0] * dirac_delta_sea * np.sqrt(2), self.sea_bc_test_functions[0])
+        if 0 in self.time_indices:
+            self.add_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
+            self.add_forcing(-amplitudes[0] * dirac_delta_sea * np.sqrt(2), self.sea_bc_test_functions[0])
 
-        for l in range(1, self.imax + 1):
-            if amplitudes[l] == 0:
+        for l in self.time_indices[int(0 in self.time_indices):]:
+            if amplitudes[self.time_indices.index(l)] == 0:
                 self.add_forcing((self.gamma[l]) * dirac_delta_sea, self.sea_bc_test_functions[l])
                 self.add_forcing((self.gamma[-l]) * dirac_delta_sea, self.sea_bc_test_functions[-l])
             else:
@@ -1384,11 +1391,11 @@ class WeakFormConstructor(object):
                 # amplitude equation
                 self.weak_form += ngsolve.sqrt((self.gamma[-l])**2 +
                                                (self.gamma[l])**2) * dirac_delta_sea * self.sea_bc_test_functions[-l] * ngsolve.dx
-                self.add_forcing(-amplitudes[l] * dirac_delta_sea, self.sea_bc_test_functions[-l])
+                self.add_forcing(-amplitudes[self.time_indices.index(l)] * dirac_delta_sea, self.sea_bc_test_functions[-l])
                 # phase equation
                 self.weak_form += ngsolve.atan2(-(self.gamma[-l]), self.gamma[l]) * \
                                   dirac_delta_sea * self.sea_bc_test_functions[l] * ngsolve.dx
-                self.add_forcing(-phases[l - 1] * dirac_delta_sea, self.sea_bc_test_functions[l])
+                self.add_forcing(-phases[self.time_indices.index(l) - int(0 in self.time_indices)] * dirac_delta_sea, self.sea_bc_test_functions[l])
 
 
     def add_internal_sea_boundary_condition_linearised(self, dirac_delta_width=0.05):
@@ -1398,13 +1405,13 @@ class WeakFormConstructor(object):
         dirac_delta_sea = ngsolve.IfPos((ngsolve.x - dirac_delta_width/2) * (-dirac_delta_width/2 - ngsolve.x),
                                         (4/(dirac_delta_width**2)) * (dirac_delta_width / 2 - ngsolve.sqrt((ngsolve.x)**2)),
                                         0) # Hat function Dirac Delta
-        
-        self.add_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
+        if 0 in self.time_indices:
+            self.add_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
 
         # sea_bc_coef_0 = {l: A0[l] * self.sea_interpolant for l in range(-self.imax, self.imax + 1)}
 
-        for l in range(1, self.imax + 1):
-            if amplitudes[l] == 0:
+        for l in self.time_indices[int(0 in self.time_indices):]:
+            if amplitudes[self.time_indices.index(l)] == 0:
                 self.add_forcing((self.gamma[l]) * dirac_delta_sea, self.sea_bc_test_functions[l])
                 self.add_forcing((self.gamma[-l]) * dirac_delta_sea, self.sea_bc_test_functions[-l])
             else:
@@ -1431,17 +1438,18 @@ class WeakFormConstructor(object):
         H = self.spatial_parameters['H']
 
         G4 = self.vertical_basis.tensor_dict['G4']
-     
-        for m in range(self.M):
-            proj_coef = 0.5 * np.sqrt(2) * G4(m)
-            self.add_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
 
-        self.add_forcing(discharge * dirac_delta_river, self.river_bc_test_functions[0]) 
+        if 0 in self.time_indices:
+            for m in range(self.M):
+                proj_coef = 0.5 * np.sqrt(2) * G4(m)
+                self.add_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
+
+            self.add_forcing(discharge * dirac_delta_river, self.river_bc_test_functions[0]) 
 
         # non-linear part (transport through cross-section from z=0 till z=zeta)
 
-        for i in range(-self.imax, self.imax + 1):
-            if self.surface_matrix[0, abs(i)] and eps != 0:
+        for i in self.fourier_indices:
+            if self.surface_matrix[0, self.time_indices.index(abs(i))] and eps != 0:
                 for m in range(self.M):
                     if i == 0:
                         proj_coef = 0.5 * G4(m)
@@ -1470,17 +1478,15 @@ class WeakFormConstructor(object):
 
         # linear part (transport through cross-section from z=-H till z=0; nothing changes in linearisation
 
-        for m in range(self.M):
-            proj_coef = 0.5 * np.sqrt(2) * self.vertical_basis.tensor_dict['G4'](m)
-            self.add_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
-
-                
-     
+        if 0 in self.time_indices:
+            for m in range(self.M):
+                proj_coef = 0.5 * np.sqrt(2) * self.vertical_basis.tensor_dict['G4'](m)
+                self.add_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
 
         # non-linear part (transport through cross-section from z=0 till z=zeta)
 
-        for i in range(-self.imax, self.imax + 1):
-            if self.surface_matrix[0, abs(i)] and eps != 0:
+        for i in self.fourier_indices:
+            if self.surface_matrix[0, self.time_indices.index(abs(i))] and eps != 0:
                 for m in range(self.M):
                     proj_coef = 0.5 * G4(m)
                     if i == 0:
@@ -1518,45 +1524,46 @@ class WeakFormConstructor(object):
 
         for p in range(self.M):
             
-            if 'momentum_advection' in self.forcing_instruction.keys():
-                self.add_momentum_advection(p, 0, equation=equation, forcing=self.forcing_instruction['momentum_advection'])
+            if 0 in self.time_indices:
+                if 'momentum_advection' in self.forcing_instruction.keys():
+                    self.add_momentum_advection(p, 0, equation=equation, forcing=self.forcing_instruction['momentum_advection'])
 
-            if 'Coriolis' in self.forcing_instruction.keys():
-                self.add_coriolis(p, 0, equation=equation, forcing=self.forcing_instruction['Coriolis'])
+                if 'Coriolis' in self.forcing_instruction.keys():
+                    self.add_coriolis(p, 0, equation=equation, forcing=self.forcing_instruction['Coriolis'])
 
-            if 'barotropic_pressure_gradient' in self.forcing_instruction.keys():
-                self.add_barotropic_pressure_gradient(p, 0, equation=equation, forcing=self.forcing_instruction['barotropic_pressure_gradient'])
-            if 'tide_bc' in self.forcing_instruction.keys() and equation == 'u':
-                self.add_natural_sea_bc(p, 0, forcing=self.forcing_instruction['tide_bc'])
+                if 'barotropic_pressure_gradient' in self.forcing_instruction.keys():
+                    self.add_barotropic_pressure_gradient(p, 0, equation=equation, forcing=self.forcing_instruction['barotropic_pressure_gradient'])
+                if 'tide_bc' in self.forcing_instruction.keys() and equation == 'u':
+                    self.add_natural_sea_bc(p, 0, forcing=self.forcing_instruction['tide_bc'])
 
-            if 'baroclinic_pressure_gradient' in self.forcing_instruction.keys():
-                self.add_baroclinic_pressure_gradient(p, 0, equation=equation, forcing=self.forcing_instruction['baroclinic_pressure_gradient'])
+                if 'baroclinic_pressure_gradient' in self.forcing_instruction.keys():
+                    self.add_baroclinic_pressure_gradient(p, 0, equation=equation, forcing=self.forcing_instruction['baroclinic_pressure_gradient'])
 
-            if 'vertical_eddy_viscosity' in self.forcing_instruction.keys():
-                self.add_vertical_eddy_viscosity(p, 0, equation=equation, forcing=self.forcing_instruction['vertical_eddy_viscosity'])
+                if 'vertical_eddy_viscosity' in self.forcing_instruction.keys():
+                    self.add_vertical_eddy_viscosity(p, 0, equation=equation, forcing=self.forcing_instruction['vertical_eddy_viscosity'])
 
-            if 'horizontal_eddy_viscosity' in self.forcing_instruction.keys():
-                self.add_horizontal_eddy_viscosity(p, 0, equation=equation, forcing=self.forcing_instruction['horizontal_eddy_viscosity'])
+                if 'horizontal_eddy_viscosity' in self.forcing_instruction.keys():
+                    self.add_horizontal_eddy_viscosity(p, 0, equation=equation, forcing=self.forcing_instruction['horizontal_eddy_viscosity'])
 
-            if self.surface_in_sigma:
-                if self.model_options['include_advection_surface_interactions'] and 'momentum_advection_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_advection_surface_interactions(p, 0, equation=equation, forcing=self.forcing_instruction['momentum_advection_surface_interactions'])
+                if self.surface_in_sigma:
+                    if self.model_options['include_advection_surface_interactions'] and 'momentum_advection_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_advection_surface_interactions(p, 0, equation=equation, forcing=self.forcing_instruction['momentum_advection_surface_interactions'])
 
-                if 'Coriolis_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_coriolis_surface_interaction(p, 0, equation=equation, forcing=self.forcing_instruction['Coriolis_surface_interactions'])
+                    if 'Coriolis_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_coriolis_surface_interaction(p, 0, equation=equation, forcing=self.forcing_instruction['Coriolis_surface_interactions'])
 
-                if 'barotropic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_barotropic_pressure_gradient_surface_interaction(p, 0, equation=equation, 
-                                                                              forcing=self.forcing_instruction['barotropic_pressure_gradient_surface_interactions'])
+                    if 'barotropic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_barotropic_pressure_gradient_surface_interaction(p, 0, equation=equation, 
+                                                                                forcing=self.forcing_instruction['barotropic_pressure_gradient_surface_interactions'])
 
-                if 'baroclinic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_baroclinic_pressure_gradient_surface_interaction(p, 0, equation=equation, 
-                                                                              forcing=self.forcing_instruction['baroclinic_pressure_gradient_surface_interactions'])
-                    
-                if 'horizontal_eddy_viscosity_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_horizontal_eddy_viscosity_surface_interactions(p, 0, equation=equation, forcing=self.forcing_instruction['horizontal_eddy_viscosity_surface_interactions'])
+                    if 'baroclinic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_baroclinic_pressure_gradient_surface_interaction(p, 0, equation=equation, 
+                                                                                forcing=self.forcing_instruction['baroclinic_pressure_gradient_surface_interactions'])
+                        
+                    if 'horizontal_eddy_viscosity_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_horizontal_eddy_viscosity_surface_interactions(p, 0, equation=equation, forcing=self.forcing_instruction['horizontal_eddy_viscosity_surface_interactions'])
 
-            for l in range(1, self.imax + 1):
+            for l in self.time_indices[int(0 in self.time_indices):]:
 
                 if 'MOM_time_derivative' in self.forcing_instruction.keys():
                     self.add_momentum_time_derivative(p, l, equation=equation, forcing=self.forcing_instruction['MOM_time_derivative'])
@@ -1626,44 +1633,45 @@ class WeakFormConstructor(object):
 
         for p in range(self.M):
             
-            if 'momentum_advection' in self.forcing_instruction.keys():
-                self.add_momentum_advection_linearised(p, 0, equation=equation, Q0=Q0)
+            if 0 in self.time_indices:
+                if 'momentum_advection' in self.forcing_instruction.keys():
+                    self.add_momentum_advection_linearised(p, 0, equation=equation, Q0=Q0)
 
-            if 'Coriolis' in self.forcing_instruction.keys():
-                self.add_coriolis(p, 0, equation=equation)
+                if 'Coriolis' in self.forcing_instruction.keys():
+                    self.add_coriolis(p, 0, equation=equation)
 
-            if 'barotropic_pressure_gradient' in self.forcing_instruction.keys():
-                self.add_barotropic_pressure_gradient(p, 0, equation=equation)
+                if 'barotropic_pressure_gradient' in self.forcing_instruction.keys():
+                    self.add_barotropic_pressure_gradient(p, 0, equation=equation)
 
-            if 'tide_bc' in self.forcing_instruction.keys() and equation == 'u':
-                self.add_natural_sea_bc(p, 0)
+                if 'tide_bc' in self.forcing_instruction.keys() and equation == 'u':
+                    self.add_natural_sea_bc(p, 0)
 
-            # the standard baroclinic pressure gradient term is always a forcing, so must be left out of the linearised equations
+                # the standard baroclinic pressure gradient term is always a forcing, so must be left out of the linearised equations
 
-            if 'vertical_eddy_viscosity' in self.forcing_instruction.keys():
-                self.add_vertical_eddy_viscosity(p, 0, equation=equation)
+                if 'vertical_eddy_viscosity' in self.forcing_instruction.keys():
+                    self.add_vertical_eddy_viscosity(p, 0, equation=equation)
 
-            if 'horizontal_eddy_viscosity' in self.forcing_instruction.keys():
-                self.add_horizontal_eddy_viscosity(p, 0, equation=equation)
+                if 'horizontal_eddy_viscosity' in self.forcing_instruction.keys():
+                    self.add_horizontal_eddy_viscosity(p, 0, equation=equation)
 
-            if self.surface_in_sigma:
+                if self.surface_in_sigma:
 
-                if self.model_options['include_advection_surface_interactions'] and 'momentum_advection_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_advection_surface_interactions_linearised(p, 0, equation=equation, Q0=Q0)
+                    if self.model_options['include_advection_surface_interactions'] and 'momentum_advection_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_advection_surface_interactions_linearised(p, 0, equation=equation, Q0=Q0)
 
-                if 'Coriolis_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_coriolis_surface_interaction_linearised(p, 0, equation=equation, Q0=Q0)
+                    if 'Coriolis_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_coriolis_surface_interaction_linearised(p, 0, equation=equation, Q0=Q0)
 
-                if 'barotropic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_barotropic_pressure_gradient_surface_interaction_linearised(p, 0, equation=equation)
+                    if 'barotropic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_barotropic_pressure_gradient_surface_interaction_linearised(p, 0, equation=equation)
 
-                if 'baroclinic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_baroclinic_pressure_gradient_surface_interaction_linearised(p, 0, equation=equation)
+                    if 'baroclinic_pressure_gradient_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_baroclinic_pressure_gradient_surface_interaction_linearised(p, 0, equation=equation)
 
-                if 'horizontal_eddy_viscosity_surface_interactions' in self.forcing_instruction.keys():
-                    self.add_horizontal_eddy_viscosity_surface_interactions_linearised(p, 0, equation=equation, Q0=Q0)
+                    if 'horizontal_eddy_viscosity_surface_interactions' in self.forcing_instruction.keys():
+                        self.add_horizontal_eddy_viscosity_surface_interactions_linearised(p, 0, equation=equation, Q0=Q0)
 
-            for l in range(1, self.imax + 1):
+            for l in self.time_indices[int(0 in self.time_indices):]:
 
                 if 'MOM_time_derivative' in self.forcing_instruction.keys():
                     self.add_momentum_time_derivative(p, l, equation=equation)

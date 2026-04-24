@@ -42,7 +42,9 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
     """
 
     M = hydro.numerical_information['M']
-    imax = hydro.numerical_information['imax']
+    # imax = hydro.numerical_information['imax']
+    time_indices = hydro.numerical_information['constituent_indices']
+    fourier_indices = constituent_indices_to_fourier_indices(time_indices)
 
     # Quick argument check
 
@@ -60,29 +62,32 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
 
     # Report that solution procedure is about to start.
     if print_log:
-        print(f"Initiating solution procedure for hydrodynamics-model with {hydro.numerical_information['M']} vertical components and {hydro.numerical_information['imax'] + 1} tidal constituents (including residual).\nThe total number of free degrees of freedom is {hydro.nfreedofs}.")
+        print(f"Initiating solution procedure for hydrodynamics-model with {hydro.numerical_information['M']} vertical components and {len(time_indices)} tidal constituents (including residual).\nThe total number of free degrees of freedom is {hydro.nfreedofs}.")
 
     # Set initial guess
     sol = ngsolve.GridFunction(hydro.femspace)
 
     # surface
-    sol.components[2*(M)*(2*imax+1)].Set(hydro.seaward_forcing.cfdict[0])
+    if 0 in time_indices:
+        sol.components[2*(M)*len(fourier_indices)].Set(hydro.seaward_forcing.cfdict[0])
 
-    for q in range(1, imax + 1):
-        sol.components[2*(M)*(2*imax+1) + q].Set(hydro.seaward_forcing.cfdict[-q])
-        sol.components[2*(M)*(2*imax+1) + imax + q].Set(hydro.seaward_forcing.cfdict[q])
+    for enum_q, q in enumerate(time_indices[int(0 in time_indices):]):
+        sol.components[2*(M)*len(fourier_indices) + enum_q + int(0 in time_indices)].Set(hydro.seaward_forcing.cfdict[-q])
+        sol.components[2*(M)*len(fourier_indices) + (len(time_indices) - int(0 in time_indices)) + enum_q + int(0 in time_indices)].Set(hydro.seaward_forcing.cfdict[q])
 
     # surface coefficients A_l
     if hydro.model_options['sea_boundary_treatment'] == 'exact':
-        sol.components[2*(M)*(2*imax+1) + (2*imax + 1)].Set(hydro.seaward_forcing.amplitudes[0] * np.sqrt(2))
-        for q in range(1, imax + 1):
-            sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q].Set(-hydro.seaward_forcing.amplitudes[q]*np.sin(hydro.seaward_forcing.phases[q-1])) # phase_list starts at semidiurnal component instead of residual; therefore index - 1
-            sol.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q].Set(hydro.seaward_forcing.amplitudes[q]*np.cos(hydro.seaward_forcing.phases[q-1])) 
+        if 0 in time_indices:
+            sol.components[(2*M+1)*len(fourier_indices)].Set(hydro.seaward_forcing.amplitudes[0] * np.sqrt(2))
+        for enum_q in enumerate(time_indices[int(0 in time_indices):]):
+            sol.components[(2*M+1)*len(fourier_indices) + enum_q + int(0 in time_indices)].Set(-hydro.seaward_forcing.amplitudes[enum_q + int(0 in time_indices)]*np.sin(hydro.seaward_forcing.phases[enum_q])) # phase_list starts at semidiurnal component instead of residual; therefore index - 1
+            sol.components[(2*M+1)*len(fourier_indices) +(len(time_indices) - int(0 in time_indices)) + enum_q + int(0 in time_indices)].Set(hydro.seaward_forcing.amplitudes[enum_q+int(0 in time_indices)]*np.cos(hydro.seaward_forcing.phases[enum_q])) 
 
         # river discharge
     # if hydro.model_options['river_boundary_treatment'] != 'exact':
-    for m in range(M): # do this always.
-        sol.components[m * (2*imax + 1)].Set(hydro.constant_physical_parameters['discharge'] * hydro.riverine_forcing.normal_alpha[m], ngsolve.BND)
+    if 0 in time_indices:
+        for m in range(M): 
+            sol.components[m * len(fourier_indices)].Set(hydro.constant_physical_parameters['discharge'] * hydro.riverine_forcing.normal_alpha[m], ngsolve.BND)
             
     hydro.solution_gf = sol 
 
@@ -167,7 +172,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                 if reduce_bandwidth:
                     cmind = reverse_cuthill_mckee(mat)
                     mat = mat[cmind[:, None], cmind]
-                # ax.spy(mat.todense())
+                ax.spy(mat.todense())
                 ax.set_xticklabels(["" for _ in ax.get_xticks()])
                 ax.set_yticklabels(["" for _ in ax.get_yticks()])
                 for i in range(mat.shape[0]):
@@ -269,7 +274,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             if plot_intermediate_results == 'all':
                 # plotting to test where convergence goes wrong
                 for m in range(M):
-                    for i in range(-imax, imax+1):
+                    for i in fourier_indices:
                         plot_CF_colormap(hydro.alpha_solution[m][i], ngsolve.Mesh(hydro.geom.GenerateMesh(maxh=0.1)), refinement_level=3, show_mesh=True, title=f'alpha_({m},{i})', save = f"iteration{newton_counter}_alpha({m},{i})")
                         # plot_CF_colormap(ngsolve.grad(hydro.alpha_solution[m][i])[0], hydro.mesh, refinement_level=3, show_mesh=True, title=f'alphax_({m},{i})', save = f"iteration{newton_counter}_alphax({m},{i})")
                         # plot_CF_colormap(ngsolve.grad(hydro.alpha_solution[m][i])[1], hydro.mesh, refinement_level=3, show_mesh=True, title=f'alphay_({m},{i})', save = f"iteration{newton_counter}_alphay({m},{i})")
@@ -277,7 +282,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                         # plot_CF_colormap(ngsolve.grad(hydro.beta_solution[m][i])[0], hydro.mesh, refinement_level=3, show_mesh=True, title=f'betax_({m},{i})', save = f"iteration{newton_counter}_betax({m},{i})")
                         # plot_CF_colormap(ngsolve.grad(hydro.beta_solution[m][i])[1], hydro.mesh, refinement_level=3, show_mesh=True, title=f'betay_({m},{i})', save = f"iteration{newton_counter}_betay({m},{i})")
 
-                for i in range(-imax, imax+1):
+                for i in fourier_indices:
                     plot_CF_colormap(hydro.gamma_solution[i], ngsolve.Mesh(hydro.geom.GenerateMesh(maxh=0.1)), refinement_level=3, show_mesh=True, title=f'gamma_({i})', save = f"iteration{newton_counter}_gamma({i})")
 
 
@@ -298,7 +303,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                         hydro.geometric_information['L_BL_sea'] + hydro.geometric_information['L_R_sea'] + hydro.geometric_information['L_RA_sea']) / x_scaling)
                     river_interpolant_x = 1 / ((hydro.geometric_information['riverine_boundary_x']+hydro.geometric_information['L_BL_river']+hydro.geometric_information['L_R_river']+hydro.geometric_information['L_RA_river'] +
                                         hydro.geometric_information['L_BL_sea'] + hydro.geometric_information['L_R_sea'] + hydro.geometric_information['L_RA_sea']) / x_scaling)
-                for i in range(-imax, imax+1):
+                for i in fourier_indices:
                     if hydro.model_options['sea_boundary_treatment'] == 'exact':
                         plot_CF_colormap(hydro.gamma_solution[i]+hydro.A_solution[i]*sea_interpolant, hydro.mesh, refinement_level=3, show_mesh=True, title=f'gamma_({i})', save = f"iteration{newton_counter}_gamma({i})")
                     else:
@@ -424,7 +429,8 @@ def get_condition_number(mat, maxits = 100, tol=1e-9):
 
 
 def compile_previous_newton_iterate(hydro: Hydrodynamics):
-    for i in range(-hydro.numerical_information['imax'], hydro.numerical_information['imax'] + 1):
+    fourier_indices = constituent_indices_to_fourier_indices(hydro.numerical_information['constituent_indices'])
+    for i in fourier_indices:
         hydro.gamma_solution[i] = hydro.gamma_solution[i].Compile()
         for m in range(hydro.numerical_information['M']):
             hydro.alpha_solution[m][i].Compile()

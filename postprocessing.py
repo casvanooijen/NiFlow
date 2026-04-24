@@ -90,7 +90,9 @@ class PostProcessing(object):
         self.transport_analysis_mode = transport_analysis_mode
 
         self.M = hydro.numerical_information['M']
-        self.imax = hydro.numerical_information['imax']
+        # self.imax = hydro.numerical_information['imax']
+        self.time_indices = hydro.numerical_information['constituent_indices']
+        self.fourier_indices = constituent_indices_to_fourier_indices(self.time_indices)
 
         self.x_scaling = hydro.geometric_information['x_scaling']
         self.y_scaling = hydro.geometric_information['y_scaling']
@@ -107,7 +109,7 @@ class PostProcessing(object):
             Q = self.hydro.Q_solution
             self.eval_Q = evaluate_CF_point(Q[0], self.hydro.mesh, 0.5, 0)
         else:
-            Q = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            Q = {q: ngsolve.CF(0) for q in self.fourier_indices}
             self.eval_Q = 0
         
 
@@ -115,10 +117,10 @@ class PostProcessing(object):
         self.v = lambda q, sigma : sum([hydro.beta_solution[m][q] * hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)])
         self.gamma = lambda q : hydro.gamma_solution[q]
 
-        self.u_timed = lambda t, sigma: sum([sum([(hydro.alpha_solution[m][q]+Q[q]*self.river_interpolant) * hydro.vertical_basis.evaluation_function(sigma, m) * hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax+1)])
-        self.v_timed = lambda t, sigma: sum([sum([hydro.beta_solution[m][q] * hydro.vertical_basis.evaluation_function(sigma, m) * hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax + 1)])
-        self.zeta_timed = lambda t: sum([self.hydro.gamma_solution[l] * self.hydro.time_basis.evaluation_function(t, l) for l in range(-self.imax, self.imax + 1)])
-        self.zetat_timed = lambda t: sum([self.hydro.gamma_solution[l] * self.hydro.time_basis.derivative_evaluation_function(t, l) for l in range(-self.imax, self.imax + 1)])
+        self.u_timed = lambda t, sigma: sum([sum([(hydro.alpha_solution[m][q]+Q[q]*self.river_interpolant) * hydro.vertical_basis.evaluation_function(sigma, m) * hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices])
+        self.v_timed = lambda t, sigma: sum([sum([hydro.beta_solution[m][q] * hydro.vertical_basis.evaluation_function(sigma, m) * hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices])
+        self.zeta_timed = lambda t: sum([self.hydro.gamma_solution[l] * self.hydro.time_basis.evaluation_function(t, l) for l in self.fourier_indices])
+        self.zetat_timed = lambda t: sum([self.hydro.gamma_solution[l] * self.hydro.time_basis.derivative_evaluation_function(t, l) for l in self.fourier_indices])
 
         ## Construct vertical velocity ######
         # Determine whether the free surface was included in the sigma-coordinates
@@ -145,7 +147,8 @@ class PostProcessing(object):
 
         self._construct_gradients()
         self._construct_transport()
-        self._construct_TWA_velocities()
+        if 0 in self.time_indices: # this only makes sense if you have computed an M0-component
+            self._construct_TWA_velocities()
 
 
 
@@ -154,7 +157,7 @@ class PostProcessing(object):
         if self.hydro.model_options['river_boundary_treatment'] == 'exact':
             Q = self.hydro.Q_solution
         else:
-            Q = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            Q = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         self.ux = lambda q, sigma : sum([(ngsolve.grad(self.hydro.alpha_solution[m][q])[0] + Q[q]*self.river_interpolant_x)* self.hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)]) / self.x_scaling
         self.vx = lambda q, sigma : sum([ngsolve.grad(self.hydro.beta_solution[m][q])[0] * self.hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)]) / self.x_scaling
@@ -170,14 +173,14 @@ class PostProcessing(object):
         self.usigsig = lambda q, sigma: sum([(self.hydro.alpha_solution[m][q] + Q[q]*self.river_interpolant) * self.hydro.vertical_basis.second_derivative_evaluation_function(sigma, m) for m in range(self.M)])
         self.vsigsig = lambda q, sigma: sum([self.hydro.beta_solution[m][q] * self.hydro.vertical_basis.second_derivative_evaluation_function(sigma, m) for m in range(self.M)]) #This is the derivative w.r.t. sigma, and not z. To transform this to the derivative w.r.t. z, divide by H^2
 
-        self.ux_timed = lambda t, sigma: sum([sum([(ngsolve.grad(self.hydro.alpha_solution[m][q])[0] + Q[q]*self.river_interpolant_x) * self.hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax+1)]) / self.x_scaling
-        self.vx_timed = lambda t, sigma: sum([sum([ngsolve.grad(self.hydro.beta_solution[m][q])[0] * self.hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax + 1)]) / self.x_scaling
+        self.ux_timed = lambda t, sigma: sum([sum([(ngsolve.grad(self.hydro.alpha_solution[m][q])[0] + Q[q]*self.river_interpolant_x) * self.hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices]) / self.x_scaling
+        self.vx_timed = lambda t, sigma: sum([sum([ngsolve.grad(self.hydro.beta_solution[m][q])[0] * self.hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices]) / self.x_scaling
 
-        self.uy_timed = lambda t, sigma: sum([sum([ngsolve.grad(self.hydro.alpha_solution[m][q])[1] * self.hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax+1)]) / self.y_scaling        
-        self.vy_timed = lambda t, sigma: sum([sum([ngsolve.grad(self.hydro.beta_solution[m][q])[1] *self. hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax + 1)]) / self.y_scaling
+        self.uy_timed = lambda t, sigma: sum([sum([ngsolve.grad(self.hydro.alpha_solution[m][q])[1] * self.hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices]) / self.y_scaling        
+        self.vy_timed = lambda t, sigma: sum([sum([ngsolve.grad(self.hydro.beta_solution[m][q])[1] *self. hydro.vertical_basis.evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices]) / self.y_scaling
 
-        self.usig_timed = lambda t, sigma: sum([sum([(self.hydro.alpha_solution[m][q] + Q[q] * self.river_interpolant) * self.hydro.vertical_basis.derivative_evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax+1)])
-        self.vsig_timed = lambda t, sigma: sum([sum([self.hydro.beta_solution[m][q] * self.hydro.vertical_basis.derivative_evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in range(-self.imax, self.imax + 1)])
+        self.usig_timed = lambda t, sigma: sum([sum([(self.hydro.alpha_solution[m][q] + Q[q] * self.river_interpolant) * self.hydro.vertical_basis.derivative_evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices])
+        self.vsig_timed = lambda t, sigma: sum([sum([self.hydro.beta_solution[m][q] * self.hydro.vertical_basis.derivative_evaluation_function(sigma, m) * self.hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices])
 
 
     def _construct_transport(self):
@@ -196,41 +199,44 @@ class PostProcessing(object):
         elif self.transport_analysis_mode == 'parent_surface':
             gamma = self.parent_hydro.gamma_solution
         elif self.transport_analysis_mode == 'no_surface':
-            gamma = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            gamma = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         # add correction term if internal boundary condition was used
         if self.hydro.model_options['river_boundary_treatment'] == 'exact':
             Q = self.hydro.Q_solution
         else:
-            Q = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            Q = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         # construct the Stokes drift term
         self.stokes_transport = []
         self.stokes_transport.append(
-             sum([sum([0.5 * gamma[q] * (alpha[m][q] + Q[q]*self.river_interpolant) * G4(m) for q in range(-self.imax, self.imax+1)]) for m in range(self.M)])
+             sum([sum([0.5 * gamma[q] * (alpha[m][q] + Q[q]*self.river_interpolant) * G4(m) for q in self.fourier_indices]) for m in range(self.M)])
         )
         self.stokes_transport.append(
-             sum([sum([0.5 * gamma[q] * beta[m][q] * G4(m) for q in range(-self.imax, self.imax+1)]) for m in range(self.M)])
+             sum([sum([0.5 * gamma[q] * beta[m][q] * G4(m) for q in self.fourier_indices]) for m in range(self.M)])
         )
 
         # total time averaged transport
         self.TA_transport = []
-        self.TA_transport.append(
-            0.5 * np.sqrt(2) * H * sum([(alpha[m][0]+Q[0]*self.river_interpolant) * G4(m) for m in range(self.M)]) + self.stokes_transport[0]
-        )
-        self.TA_transport.append(
-            0.5 * np.sqrt(2) * H * sum([beta[m][0] * G4(m) for m in range(self.M)]) + self.stokes_transport[1]
-        )
+        if 0 in self.time_indices:
+            self.TA_transport.append(
+                0.5 * np.sqrt(2) * H * sum([(alpha[m][0]+Q[0]*self.river_interpolant) * G4(m) for m in range(self.M)]) + self.stokes_transport[0]
+            )
+            self.TA_transport.append(
+                0.5 * np.sqrt(2) * H * sum([beta[m][0] * G4(m) for m in range(self.M)]) + self.stokes_transport[1]
+            )
+        else:
+            self.TA_transport += self.stokes_transport
 
         # instantaneous transport
         self.timed_transport = []
         self.timed_transport.append(
-            lambda t: sum([sum([H * (alpha[m][i]+Q[i]*self.river_interpolant) * G4(m) * self.hydro.time_basis.evaluation_function(t, i) for i in range(-self.imax, self.imax + 1)]) for m in range(self.M)]) + \
-            sum([sum([sum([gamma[i] * (alpha[m][j]+Q[j]*self.river_interpolant) * G4(m) * self.hydro.time_basis.evaluation_function(t, i) * self.hydro.time_basis.evaluation_function(t, j) for i in range(-self.imax, self.imax + 1)]) for j in range(-self.imax, self.imax + 1)]) for m in range(self.M)])
+            lambda t: sum([sum([H * (alpha[m][i]+Q[i]*self.river_interpolant) * G4(m) * self.hydro.time_basis.evaluation_function(t, i) for i in self.fourier_indices]) for m in range(self.M)]) + \
+            sum([sum([sum([gamma[i] * (alpha[m][j]+Q[j]*self.river_interpolant) * G4(m) * self.hydro.time_basis.evaluation_function(t, i) * self.hydro.time_basis.evaluation_function(t, j) for i in self.fourier_indices]) for j in self.fourier_indices]) for m in range(self.M)])
         )
         self.timed_transport.append(
-            lambda t: sum([sum([H * beta[m][i] * G4(m) * self.hydro.time_basis.evaluation_function(t, i) for i in range(-self.imax, self.imax + 1)]) for m in range(self.M)]) + \
-            sum([sum([sum([gamma[i] * beta[m][j] * G4(m) * self.hydro.time_basis.evaluation_function(t, i) * self.hydro.time_basis.evaluation_function(t, j) for i in range(-self.imax, self.imax + 1)]) for j in range(-self.imax, self.imax + 1)]) for m in range(self.M)])
+            lambda t: sum([sum([H * beta[m][i] * G4(m) * self.hydro.time_basis.evaluation_function(t, i) for i in self.fourier_indices]) for m in range(self.M)]) + \
+            sum([sum([sum([gamma[i] * beta[m][j] * G4(m) * self.hydro.time_basis.evaluation_function(t, i) * self.hydro.time_basis.evaluation_function(t, j) for i in self.fourier_indices]) for j in self.fourier_indices]) for m in range(self.M)])
         )
 
         
@@ -245,23 +251,23 @@ class PostProcessing(object):
 
         sig_h_f_term = lambda t, sig: sum(sum(
             (Hx * self.hydro.alpha_solution[m][q] / self.x_scaling + Hy * self.hydro.beta_solution[m][q] / self.x_scaling) * sig * f(sig, m) * h(t, q)
-            for q in range(-self.imax, self.imax + 1)) for m in range(self.M))
+            for q in self.fourier_indices) for m in range(self.M))
         
         onepsig_hh_f_term = lambda t, sig: sum(sum(sum(
             (self.hydro.gamma_grad[i][0] * self.hydro.alpha_solution[m][j] / self.x_scaling + self.hydro.gamma_grad[i][1] * self.hydro.beta_solution[m][j] / self.x_scaling) *
             (1 + sig) * h(t, i) * h(t, j) * f(sig, m)
-        for i in range(-self.imax, self.imax + 1)) for j in range(-self.imax, self.imax + 1)) for m in range(self.M))
+        for i in self.fourier_indices) for j in self.fourier_indices) for m in range(self.M))
 
         h_F_term = lambda t, sig: sum(sum(
             (H * self.hydro.alpha_grad[m][i][0] / self.x_scaling + Hx * self.hydro.alpha_solution[m][i] / self.x_scaling + 
             H * self.hydro.beta_grad[m][i][1] / self.x_scaling + Hy * self.hydro.beta_solution[m][i] / self.x_scaling) * h(t, i) * F(sig, m)
-        for i in range(-self.imax, self.imax + 1)) for m in range(self.M))
+        for i in self.fourier_indices) for m in range(self.M))
 
         hh_F_term = lambda t, sig: sum(sum(sum(
             (self.hydro.gamma_solution[i] * self.hydro.alpha_grad[m][j][0] / self.x_scaling + self.hydro.gamma_grad[i][0] * self.hydro.alpha_solution[m][j] / self.x_scaling +
              self.hydro.gamma_solution[i] * self.hydro.beta_grad[m][j][1] / self.x_scaling + self.hydro.gamma_grad[i][1] * self.hydro.beta_solution[m][j] / self.x_scaling) *
              h(t, i) * h(t, j) * F(sig, m)
-        for i in range(-self.imax, self.imax + 1)) for j in range(-self.imax, self.imax + 1)) for m in range(self.M))
+        for i in self.fourier_indices) for j in self.fourier_indices) for m in range(self.M))
 
         self.w_timed = lambda t, sig: sig_h_f_term(t, sig) + onepsig_hh_f_term(t, sig) - h_F_term(t, sig) - hh_F_term(t, sig)
     
@@ -272,16 +278,16 @@ class PostProcessing(object):
         Hx = self.hydro.spatial_parameters_grad['H'][0] / self.x_scaling
         Hy = self.hydro.spatial_parameters_grad['H'][1] / self.y_scaling        
 
-        self.w_TA_sig_fm_coefficients = [0.5 * np.sqrt(2) * (self.hydro.alpha_solution[m][0] * Hx + self.hydro.beta_solution[m][0] * Hy) for m in range(self.M)]
+        self.w_TA_sig_fm_coefficients = [0.5 * np.sqrt(2) * (self.hydro.alpha_solution[m][0] * Hx + self.hydro.beta_solution[m][0] * Hy) for m in range(self.M)] if 0 in self.time_indices else [0 for _ in range(self.M)]
         self.w_TA_onepsig_fm_coefficients = [sum(0.5 * self.hydro.gamma_grad[q][0] / self.x_scaling * self.hydro.alpha_solution[m][q] + 
-                                                 0.5 * self.hydro.gamma_grad[q][1] / self.y_scaling * self.hydro.beta_solution[m][q] for q in range(-self.imax, self.imax + 1)) for m in range(self.M)]
+                                                 0.5 * self.hydro.gamma_grad[q][1] / self.y_scaling * self.hydro.beta_solution[m][q] for q in self.fourier_indices) for m in range(self.M)]
         self.w_TA_FM_coefficients = [
             self.hydro.alpha_grad[m][0][0] * H / self.x_scaling + self.hydro.beta_grad[m][0][1] * H / self.y_scaling +
             self.hydro.alpha_solution[m][0] * Hx + self.hydro.beta_solution[m][0] * Hy + 
             0.5 * sum(
                 self.hydro.gamma_solution[q] * self.hydro.alpha_grad[m][q][0] / self.x_scaling + self.hydro.gamma_solution[q] * self.hydro.beta_grad[m][q][1] / self.y_scaling +
                 self.hydro.gamma_grad[q][0] * self.hydro.alpha_solution[m][q] / self.x_scaling + self.hydro.gamma_grad[q][1] * self.hydro.beta_solution[m][q] / self.y_scaling
-                for q in range(-self.imax, self.imax + 1)
+                for q in self.fourier_indices
             )
             for m in range(self.M)
         ]
@@ -302,23 +308,23 @@ class PostProcessing(object):
         elif self.transport_analysis_mode == 'parent_surface':
             gamma = self.parent_hydro.gamma_solution
         elif self.transport_analysis_mode == 'no_surface':
-            gamma = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            gamma = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         if self.hydro.model_options['river_boundary_treatment'] == 'exact':
             Q = self.hydro.Q_solution
         else:
-            Q = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            Q = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         H = self.hydro.spatial_parameters['H']
 
         u_depth_correlation = lambda sig: H * np.sqrt(2) / 2 * \
                     sum((self.hydro.alpha_solution[m][0] + self.river_interpolant * Q[0]) * self.hydro.vertical_basis.evaluation_function(sig, m) for m in range(self.M)) + \
-                    0.5 * sum(sum(gamma[i] * (self.hydro.alpha_solution[m][i] + Q[i]*self.river_interpolant) * self.hydro.vertical_basis.evaluation_function(sig, m) for i in range(-self.imax, self.imax + 1)) for m in range(self.M))
+                    0.5 * sum(sum(gamma[i] * (self.hydro.alpha_solution[m][i] + Q[i]*self.river_interpolant) * self.hydro.vertical_basis.evaluation_function(sig, m) for i in self.fourier_indices) for m in range(self.M))
 
         v_depth_correlation = lambda sig: H * np.sqrt(2) / 2 * sum(self.hydro.beta_solution[m][0] * self.hydro.vertical_basis.evaluation_function(sig, m) for m in range(self.M)) + \
-                                0.5 * sum(sum(gamma[i] * self.hydro.beta_solution[m][i] * self.hydro.vertical_basis.evaluation_function(sig, m) for i in range(-self.imax, self.imax + 1)) for m in range(self.M))
+                                0.5 * sum(sum(gamma[i] * self.hydro.beta_solution[m][i] * self.hydro.vertical_basis.evaluation_function(sig, m) for i in self.fourier_indices) for m in range(self.M))
         
-        oscillating_components = list(range(-self.imax, 0)) + list(range(1, self.imax + 1))
+        oscillating_components = [ind for ind in self.fourier_indices if ind != 0]
         u_depth_correlation_stokes = lambda sig: 0.5 * sum(sum(gamma[i] * (self.hydro.alpha_solution[m][i] + Q[i]*self.river_interpolant) * self.hydro.vertical_basis.evaluation_function(sig, m) for i in oscillating_components) for m in range(self.M))
         v_depth_correlation_stokes = lambda sig: 0.5 * sum(sum(gamma[i] * self.hydro.beta_solution[m][i] * self.hydro.vertical_basis.evaluation_function(sig, m) for i in oscillating_components) for m in range(self.M))
 
@@ -347,12 +353,12 @@ class PostProcessing(object):
         elif self.transport_analysis_mode == 'parent_surface':
             gamma = self.parent_hydro.gamma_solution
         elif self.transport_analysis_mode == 'no_surface':
-            gamma = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            gamma = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         if self.hydro.model_options['river_boundary_treatment'] == 'exact':
             Q = self.hydro.Q_solution
         else:
-            Q = {q: ngsolve.CF(0) for q in range(-self.imax, self.imax + 1)}
+            Q = {q: ngsolve.CF(0) for q in self.fourier_indices}
 
         H_cf = self.hydro.spatial_parameters['H']
         
@@ -364,8 +370,8 @@ class PostProcessing(object):
         Vy = np.zeros_like(V)
 
         for m in range(self.M):
-            u_transp = 0.5 * sum(gamma[i]*(self.hydro.alpha_solution[m][i] + Q[i]*self.river_interpolant) for i in range(-self.imax, self.imax + 1)) # first add only oscillating surface components
-            v_transp = 0.5 * sum(gamma[i]*self.hydro.beta_solution[m][i] for i in range(-self.imax, self.imax + 1))
+            u_transp = 0.5 * sum(gamma[i]*(self.hydro.alpha_solution[m][i] + Q[i]*self.river_interpolant) for i in self.fourier_indices) # first add only oscillating surface components
+            v_transp = 0.5 * sum(gamma[i]*self.hydro.beta_solution[m][i] for i in self.fourier_indices)
             
             if not stokes_w: # then add linear component if we are computing w not only with the surface
                 u_transp += H_cf * 0.5 * np.sqrt(2) * (self.hydro.alpha_solution[m][0]+Q[0]*self.river_interpolant)
@@ -976,7 +982,7 @@ class HydroPlot(object):
             W_TWA[k, :] += sig * (depth_x * U[k, :] + depth_y * V[k, :]) # correction for different coordinate system
 
 
-        self.add_cross_section_plot(title, x, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(V, W_TWA), stride=(gridsize-1)//30, **kwargs)
+        self.add_cross_section_plot(title, x, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(V, W_TWA), **kwargs)
 
 
     def add_cross_section_stokes_circulation(self, x, return_flow_pp: PostProcessing, title=None, plot_u=True, gridsize=151, **kwargs):
@@ -1021,7 +1027,7 @@ class HydroPlot(object):
             W_TWA[k, :] += sig * (depth_x * U[k, :] + depth_y * V[k, :]) # correction for different coordinate system
 
 
-        self.add_cross_section_plot(title, x, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(V, W_TWA), stride=(gridsize-1)//30, **kwargs)
+        self.add_cross_section_plot(title, x, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(V, W_TWA), **kwargs)
 
 
     def add_2DV_TWA_circulation(self, y, title=None, plot_u=True, gridsize=151, **kwargs):
@@ -1063,7 +1069,7 @@ class HydroPlot(object):
             W_TWA[k, :] += sig * (depth_x * U[k, :] + depth_y * V[k, :]) # correction for different coordinate system
 
 
-        self.add_2DV_plot(title, y, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(U, W_TWA), stride=(gridsize-1)//30, **kwargs)
+        self.add_2DV_plot(title, y, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(U, W_TWA), **kwargs)
 
     
     def add_2DV_stokes_circulation(self, y, return_flow_pp: PostProcessing, title=None, plot_u=True, gridsize=151, **kwargs):
@@ -1106,5 +1112,5 @@ class HydroPlot(object):
             W_TWA[k, :] += sig * (depth_x * U[k, :] + depth_y * V[k, :]) # correction for different coordinate system
 
 
-        self.add_2DV_plot(title, y, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(U, W_TWA), stride=(gridsize-1)//30, **kwargs)
+        self.add_2DV_plot(title, y, gridsize, gridsize, colormap_quantity_function=colormap_QF, clabel='Axial transport velocity [m/s]', vectorfield_quantity_function=(U, W_TWA), **kwargs)
 

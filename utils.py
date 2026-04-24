@@ -506,16 +506,10 @@ def L2err_vector_gridfunction(gf1, gf2, mesh):
     return ngsolve.sqrt(error_squared)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+def constituent_indices_to_fourier_indices(time_indices):
+    fourier_indices = []
+    for i in time_indices:
+        fourier_indices.append(i)
+        if i != 0:
+            fourier_indices.append(-i)
+    return fourier_indices

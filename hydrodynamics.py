@@ -102,13 +102,13 @@ def set_geometric_information(domain_shape: str, shape_parameters: tuple, x_scal
     return geometric_information
 
 
-def set_numerical_information(M, imax, order, grid_size, mesh_generation_method, element_type, continuation_parameters={'advection_epsilon': [1], 'Av': [1], 'Ah': [1]}):
+def set_numerical_information(M, constituent_indices:list, order, grid_size, mesh_generation_method, element_type, continuation_parameters={'advection_epsilon': [1], 'Av': [1], 'Ah': [1]}):
     """Returns dictionary of numerical information, associated to the meshing and the Finite Element formulation
     
     Arguments:
     
     - M:                                number of vertical basis functions that should be taken into account.
-    - imax:                             number of tidal constituents (excluding M0) that should be taken into account.
+    - constituent_indices:              list of indices of tidal constituents that are taken into account, where 0 corresponds to M0, 1 corresponds to M2, 2 corresponds to M4, etc.
     - order:                            order of the finite element basis.
     - grid_size:                        grid size used for mesh; if a structured approach is used, then supply a tuple for this variable, which leads to grid_size[0] cells in the y-direction and grid_size[1] cells in the x-direction.                                                         
     - mesh_generation_method:           method by which the mesh is generated; options: 'structured_quads', 'structured_tri_AQ', 'structured_tri_DQ', 'structured_tri_CCQ', 'unstructured'.
@@ -128,9 +128,15 @@ def set_numerical_information(M, imax, order, grid_size, mesh_generation_method,
         if not isinstance(grid_size, tuple):
             raise ValueError("For structuref grids, provide a tuple denoting the number of grid cells in each direction")
 
+    if 0 in constituent_indices:
+        num_fourier_coefficients = 1 + 2 * (len(constituent_indices) - 1)
+    else:
+        num_fourier_coefficients = 2 * len(constituent_indices)
+
     info = {
         'M': M,
-        'imax': imax,
+        'constituent_indices': sorted(constituent_indices),
+        'num_fourier_coefficients': num_fourier_coefficients,
         'order': order,
         'grid_size': grid_size,
         'mesh_generation_method': mesh_generation_method,
@@ -341,7 +347,8 @@ class Hydrodynamics(object):
 
         # shorthands for long variable names
         M = self.numerical_information['M']
-        imax = self.numerical_information['imax']
+        constituent_indices = self.numerical_information['constituent_indices']
+        num_fourier_coefficients = self.numerical_information['num_fourier_coefficients']
 
         u_dirichlet = f"{BOUNDARY_DICT[RIVER]}" if self.model_options['wall_boundary_condition'] == 'free_slip' else f"{BOUNDARY_DICT[RIVER]}|{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}"
         
@@ -372,30 +379,30 @@ class Hydrodynamics(object):
         self.nfreedofs_beta = count_free_dofs(self.V)
         self.nfreedofs_gamma = count_free_dofs(self.Z)
 
-        self.ndofs_u = self.ndofs_alpha * M * (2 * imax + 1)
-        self.ndofs_v = self.ndofs_beta * M * (2 * imax + 1)
-        self.ndofs_z = self.ndofs_gamma * (2 * imax + 1)
+        self.ndofs_u = self.ndofs_alpha * M * num_fourier_coefficients
+        self.ndofs_v = self.ndofs_beta * M * num_fourier_coefficients
+        self.ndofs_z = self.ndofs_gamma * num_fourier_coefficients
         
-        self.nfreedofs_u = self.nfreedofs_alpha * M * (2 * imax + 1)
-        self.nfreedofs_v = self.nfreedofs_beta * M * (2 * imax + 1)
-        self.nfreedofs_z = self.nfreedofs_gamma * (2 * imax + 1)
+        self.nfreedofs_u = self.nfreedofs_alpha * M * num_fourier_coefficients
+        self.nfreedofs_v = self.nfreedofs_beta * M * num_fourier_coefficients
+        self.nfreedofs_z = self.nfreedofs_gamma * num_fourier_coefficients
 
         if self.model_options['sea_boundary_treatment'] == 'exact' or self.model_options['river_boundary_treatment'] == 'exact': # take into account floating point errors
             scalarFESpace = ngsolve.NumberSpace(self.mesh)
         
-        list_of_spaces = [self.U for _ in range(M*(2*imax + 1))]
-        for _ in range(M*(2*imax + 1)): 
+        list_of_spaces = [self.U for _ in range(M*num_fourier_coefficients)]
+        for _ in range(M*num_fourier_coefficients): 
             list_of_spaces.append(self.V)
-        for _ in range(2*imax + 1):
+        for _ in range(num_fourier_coefficients):
             list_of_spaces.append(self.Z)
 
         if self.model_options['sea_boundary_treatment'] == 'exact' and self.model_options['river_boundary_treatment'] == 'exact': # if we treat the boundary on both sides
-            for _ in range(2 * imax + 2): # only one dimension for scalar Q
+            for _ in range(num_fourier_coefficients + 1): # only one dimension for scalar Q
                 list_of_spaces.append(scalarFESpace)
         elif self.model_options['sea_boundary_treatment'] != 'exact' and self.model_options['river_boundary_treatment'] != 'exact': # if we do not treat the boundaries
             pass
         elif self.model_options['sea_boundary_treatment'] == 'exact' and self.model_options['river_boundary_treatment'] != 'exact':
-            for _ in range(2 * imax + 1): # if we have ramping on only one side
+            for _ in range(num_fourier_coefficients): # if we have ramping on only one side
                 list_of_spaces.append(scalarFESpace)
         elif self.model_options['sea_boundary_treatment'] != 'exact' and self.model_options['river_boundary_treatment'] == 'exact':
             # for _ in range(2 * imax + 1): # if we have ramping on only one side
@@ -404,101 +411,70 @@ class Hydrodynamics(object):
         X = ngsolve.FESpace(list_of_spaces)
         self.femspace = X
 
+    def _single_index_data_to_double_index(self, data):
+        """Takes a long vector of all the coefficients, and sorts them into dictionaries based on the variable, vertical component, and time component.
+        If you ever want to change the block structure of the matrix, this is the function to modify."""
+
+
+        M = self.numerical_information['M']
+        constituent_indices = self.numerical_information['constituent_indices']
+        account_for_M0 = (0 in constituent_indices)
+        index_offset = int(account_for_M0)# if we add this constituent, offset the rest of indices by one so we don't assign duplicate spots
+        num_time_components = self.numerical_information['num_fourier_coefficients']
+
+        alpha = [dict() for _ in range(M)]
+        beta = [dict() for _ in range(M)]
+        gamma = dict()
+        A = dict()
+        Q = dict()
+
+        for m in range(M):
+            
+            if account_for_M0:
+                alpha[m][0] = data[m * num_time_components]
+                beta[m][0] = data[(M + m) * num_time_components]
+
+            for i, const_index in enumerate(constituent_indices[index_offset:]):
+                alpha[m][-const_index] = data[m * num_time_components + i + index_offset]
+                alpha[m][const_index] = data[m * num_time_components + (len(constituent_indices) - index_offset) + (i + index_offset)]
+
+                beta[m][-const_index] = data[(M + m) * num_time_components + i + index_offset]
+                beta[m][const_index] = data[(M + m) * num_time_components + (len(constituent_indices) - index_offset) + (i + index_offset)]
+
+        
+        if account_for_M0:
+            gamma[0] = data[2*M*num_time_components]
+
+        for i, const_index in enumerate(constituent_indices[index_offset:]):
+            gamma[-const_index] = data[2*M*num_time_components + i + index_offset]
+            gamma[const_index] = data[2*M*num_time_components + (len(constituent_indices) - index_offset) + (i + index_offset)]
+
+        if self.model_options['sea_boundary_treatment'] == 'exact': 
+            if account_for_M0:
+                A[0] = data[2*M*num_time_components + num_time_components]
+
+            for i, const_index in enumerate(constituent_indices[index_offset:]):
+                A[-const_index] = data[2*M*num_time_components + num_time_components + i + index_offset]
+                A[const_index] = data[2*M*num_time_components + num_time_components + (len(constituent_indices) - index_offset) + (i + index_offset)]
+
+        if self.model_options['river_boundary_treatment'] == 'exact': # if only the river side is ramped
+                if account_for_M0:
+                    Q[0] = data[2*M*num_time_components + (1 + int(self.model_options['sea_boundary_treatment'] == 'exact')) * num_time_components]
+                else:
+                    raise ValueError("Hold up! If you want to work with an internal river condition, you have to include the M0 constituent, which you have not done.")
+                
+        return alpha, beta, gamma, A, Q
+
 
 
     def _setup_TnT(self):
-        """Sorts the ngsolve Trial and Test functions into intuitive dictionaries"""
+        """Sorts the ngsolve Trial and Test functions into intuitive dictionaries. If you ever want to change the block structure of the matrix, this is the function to modify."""
 
         trialtuple = self.femspace.TrialFunction()
         testtuple = self.femspace.TestFunction()
 
-        M = self.numerical_information['M']
-        imax = self.numerical_information['imax']
-        num_time_components = 2 * imax + 1
-
-
-        alpha_trialfunctions = [dict() for _ in range(M)]
-        umom_testfunctions = [dict() for _ in range(M)] # test functions for momentum equation u
-
-        beta_trialfunctions = [dict() for _ in range(M)]
-        vmom_testfunctions = [dict() for _ in range(M)] # test functions for momentum equation v
-
-        gamma_trialfunctions = dict()
-        DIC_testfunctions = dict() # test functions for Depth-Integrated Continuity equation
-
-        for m in range(M):
-
-            alpha_trialfunctions[m][0] = trialtuple[m * num_time_components]
-            umom_testfunctions[m][0] = testtuple[m * num_time_components]
-
-            beta_trialfunctions[m][0] = trialtuple[(M + m) * num_time_components]
-            vmom_testfunctions[m][0] = testtuple[(M + m) * num_time_components]
-            for i in range(1, imax + 1):
-                alpha_trialfunctions[m][-i] = trialtuple[m * num_time_components + i]
-                alpha_trialfunctions[m][i] = trialtuple[m * num_time_components + imax + i]
-
-                umom_testfunctions[m][-i] = testtuple[m * num_time_components + i]
-                umom_testfunctions[m][i] = testtuple[m * num_time_components + imax + i]
-
-                beta_trialfunctions[m][-i] = trialtuple[(M + m) * num_time_components + i]
-                beta_trialfunctions[m][i] = trialtuple[(M + m) * num_time_components + imax + i]
-
-                vmom_testfunctions[m][-i] = testtuple[(M + m) * num_time_components + i]
-                vmom_testfunctions[m][i] = testtuple[(M + m) * num_time_components + imax + i]
-        
-        gamma_trialfunctions[0] = trialtuple[2*M*num_time_components]
-        DIC_testfunctions[0] = testtuple[2*M*num_time_components]
-
-        for i in range(1, imax + 1):
-            gamma_trialfunctions[-i] = trialtuple[2*M*num_time_components + i]
-            gamma_trialfunctions[i] = trialtuple[2*M*num_time_components + imax + i]
-
-            DIC_testfunctions[-i] = testtuple[2*M*num_time_components + i]
-            DIC_testfunctions[i] = testtuple[2*M*num_time_components + imax + i]
-
-        if self.model_options['sea_boundary_treatment'] == 'exact': 
-            A_trialfunctions = dict()
-            sea_boundary_testfunctions = dict()
-
-            A_trialfunctions[0] = trialtuple[2*M*num_time_components + num_time_components]
-            sea_boundary_testfunctions[0] = testtuple[2*M*num_time_components + num_time_components]
-
-            for i in range(1, imax + 1):
-                A_trialfunctions[-i] = trialtuple[2*M*num_time_components + num_time_components + i]
-                A_trialfunctions[i] = trialtuple[2*M*num_time_components + num_time_components + imax + i]
-
-                sea_boundary_testfunctions[-i] = testtuple[2*M*num_time_components + num_time_components + i]
-                sea_boundary_testfunctions[i] = testtuple[2*M*num_time_components + num_time_components + imax + i]
-
-            self.A_trialfunctions = A_trialfunctions
-            self.sea_boundary_testfunctions = sea_boundary_testfunctions
-
-            if self.model_options['river_boundary_treatment'] == 'exact': # if both sides are ramped
-                Q_trialfunctions = dict()
-                river_boundary_testfunctions = dict()
-
-                Q_trialfunctions[0] = trialtuple[2*M*num_time_components + 2*num_time_components]
-                river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + 2*num_time_components]
-
-                self.Q_trialfunctions = Q_trialfunctions
-                self.river_boundary_testfunctions = river_boundary_testfunctions
-
-        elif self.model_options['river_boundary_treatment'] == 'exact': # if only the river side is ramped
-                Q_trialfunctions = dict()
-                river_boundary_testfunctions = dict()
-
-                Q_trialfunctions[0] = trialtuple[2*M*num_time_components + num_time_components]
-                river_boundary_testfunctions[0] = testtuple[2*M*num_time_components + num_time_components]
-
-                self.Q_trialfunctions = Q_trialfunctions
-                self.river_boundary_testfunctions = river_boundary_testfunctions
-
-        self.alpha_trialfunctions = alpha_trialfunctions
-        self.umom_testfunctions = umom_testfunctions
-        self.beta_trialfunctions = beta_trialfunctions
-        self.vmom_testfunctions = vmom_testfunctions
-        self.gamma_trialfunctions = gamma_trialfunctions
-        self.DIC_testfunctions = DIC_testfunctions
+        self.alpha_trialfunctions, self.beta_trialfunctions, self.gamma_trialfunctions, self.A_trialfunctions, self.Q_trialfunctions = self._single_index_data_to_double_index(trialtuple)
+        self.umom_testfunctions, self.vmom_testfunctions, self.DIC_testfunctions, self.sea_boundary_testfunctions, self.river_boundary_testfunctions = self._single_index_data_to_double_index(testtuple)
 
     # Public methods
 
@@ -531,70 +507,31 @@ class Hydrodynamics(object):
         self.total_bilinearform = a_total
 
     def restructure_solution(self):
-        """Associates each part of the solution gridfunction vector to a Fourier and vertical eigenfunction pair."""
+        """Associates each part of the solution gridfunction vector to a Fourier and vertical eigenfunction pair. Very similar to function _setup_TnT(). Can probably prevent code duplication"""
 
-        M = self.numerical_information['M']
-        imax = self.numerical_information['imax']
-
-        self.alpha_solution = [dict() for _ in range(M)]
-        self.beta_solution = [dict() for _ in range(M)]
-        self.gamma_solution = dict()
-        self.A_solution = dict()
-        self.Q_solution = dict()
-
-        for m in range(M):
-            self.alpha_solution[m][0] = self.solution_gf.components[m * (2*imax + 1)]
-            self.beta_solution[m][0] = self.solution_gf.components[(M + m) * (2*imax + 1)]
-            
-            for q in range(1, imax + 1):
-                self.alpha_solution[m][-q] = self.solution_gf.components[m * (2*imax + 1) + q]
-                self.alpha_solution[m][q] = self.solution_gf.components[m * (2*imax + 1) + imax + q]
-
-                self.beta_solution[m][-q] = self.solution_gf.components[(M + m) * (2*imax + 1) + q]
-                self.beta_solution[m][q] = self.solution_gf.components[(M + m) * (2*imax + 1) + imax + q]
-        
-        self.gamma_solution[0] = self.solution_gf.components[2*(M)*(2*imax+1)]
-
-        for q in range(1, imax + 1):
-            self.gamma_solution[-q] = self.solution_gf.components[2*(M)*(2*imax+1) + q]
-            self.gamma_solution[q] = self.solution_gf.components[2*(M)*(2*imax+1) + imax + q]
-
-
-        if self.model_options['sea_boundary_treatment'] == 'exact':
-            self.A_solution[0] = self.solution_gf.components[2*(M)*(2*imax+1) + (2*imax + 1)]
-            for q in range(1, imax + 1):
-                self.A_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q]
-                self.A_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q]
-
-            if self.model_options['river_boundary_treatment'] == 'exact': # if both layers are handled, then river follows the sea
-                self.Q_solution[0] = self.solution_gf.components[2*(M)*(2*imax+1) + 2*(2*imax + 1)]
-                for q in range(1, imax + 1):
-                    # self.Q_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + 2*(2*imax + 1) + q]
-                    # self.Q_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + 2*(2*imax + 1) + imax + q]
-                    self.Q_solution[-q] = 0
-                    self.Q_solution[q] = 0
-        elif self.model_options['river_boundary_treatment'] == 'exact':
-            self.Q_solution[0] = self.solution_gf.components[2*(M)*(2*imax+1) + (2*imax + 1)]
-            for q in range(1, imax + 1):
-                # self.Q_solution[-q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + q]
-                # self.Q_solution[q] = self.solution_gf.components[2*(M)*(2*imax + 1) + (2*imax + 1) + imax + q]
-                self.Q_solution[-q] = 0
-                self.Q_solution[q] = 0
+        self.alpha_solution, self.beta_solution, self.gamma_solution, self.A_solution, self.Q_solution = self._single_index_data_to_double_index(self.solution_gf.components)
+        if self.model_options['river_boundary_treatment'] == 'exact':
+            for const_index in self.numerical_information['constituent_indices'][1:]: # don't include 0; for legacy reasons, we still need Q_solution to be defined for other indices than 0, so we manually put them to 0.
+                self.Q_solution[const_index] = 0
+                self.Q_solution[-const_index] = 0
 
 
     def get_gradients(self, compiled=True):
         M = self.numerical_information['M']
-        imax = self.numerical_information['imax']
+        indices = self.numerical_information['constituent_indices']
 
         self.alpha_grad = [dict() for _ in range(M)]
         self.beta_grad = [dict() for _ in range(M)]
         self.gamma_grad = dict()
         
-        for i in range(-imax, imax + 1):
+        for i in indices:
             self.gamma_grad[i] = ngsolve.grad(self.gamma_solution[i]).Compile() if compiled else ngsolve.grad(self.gamma_solution[i])
+            self.gamma_grad[-i] = ngsolve.grad(self.gamma_solution[-i]).Compile() if compiled else ngsolve.grad(self.gamma_solution[-i])
             for m in range(M):
                 self.alpha_grad[m][i] = ngsolve.grad(self.alpha_solution[m][i]).Compile() if compiled else ngsolve.grad(self.alpha_solution[m][i])
                 self.beta_grad[m][i] = ngsolve.grad(self.beta_solution[m][i]).Compile() if compiled else ngsolve.grad(self.beta_solution[m][i])
+                self.alpha_grad[m][-i] = ngsolve.grad(self.alpha_solution[m][-i]).Compile() if compiled else ngsolve.grad(self.alpha_solution[m][-i])
+                self.beta_grad[m][-i] = ngsolve.grad(self.beta_solution[m][-i]).Compile() if compiled else ngsolve.grad(self.beta_solution[m][-i])
 
 
     def save(self, name: str, solution_format='npy'):
@@ -787,7 +724,8 @@ class DecomposedHydrodynamics(Hydrodynamics):
         if not self.parent_hydro.is_decomposed: # to do: make sure copies are made instead of references copied
             forcing_alpha = [self.parent_hydro.alpha_solution]
             forcing_beta = [self.parent_hydro.beta_solution]
-            forcing_gamma = [{l: self.parent_hydro.gamma_solution[l] for l in range(-self.parent_hydro.numerical_information['imax'], self.parent_hydro.numerical_information['imax'] + 1)}]
+            # forcing_gamma = [{l: self.parent_hydro.gamma_solution[l] for l in range(-self.parent_hydro.numerical_information['imax'], self.parent_hydro.numerical_information['imax'] + 1)}]
+            forcing_gamma = [self.parent_hydro.gamma_solution]
             forcing_Q = [self.parent_hydro.Q_solution]
             forcing_A = [self.parent_hydro.A_solution]
         else:
@@ -1039,22 +977,29 @@ class SeawardForcing(object):
         - hydro: Hydrodynamics-object this boundary condition is associated to.
         """
         self.hydro = hydro
+        indices = hydro.numerical_information['constituent_indices']
 
         # Fill amplitudes and phases with zeros in the places where they are not prescribed
         self.amplitudes = hydro.constant_physical_parameters['seaward_amplitudes']
         self.phases = hydro.constant_physical_parameters['seaward_phases']
-        for _ in range(hydro.numerical_information['imax'] + 1 - len(self.amplitudes)):
+        for _ in range(len(hydro.numerical_information['constituent_indices']) - len(self.amplitudes)):
             self.amplitudes.append(0)
             self.phases.append(0)
+        
+        if 0 in indices:
+            self.cfdict = {0: self.amplitudes[0] * np.sqrt(2)}
+            self.boundaryCFdict = {0: hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[0]}, default=0)}
+            index_offset = 1
+        else:
+            self.cfdict, self.boundaryCFdict = {}, {}
+            index_offset = 0
 
-        self.cfdict = {0: self.amplitudes[0] * np.sqrt(2)}
-        self.boundaryCFdict = {0: hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[0]}, default=0)}
-        for i in range(1, hydro.numerical_information['imax'] + 1):
-            self.cfdict[i] = self.amplitudes[i] * ngsolve.cos(self.phases[i-1]) # phase for residual flow is not defined, therefore list index i - 1
-            self.cfdict[-i] = -self.amplitudes[i] * ngsolve.sin(self.phases[i-1])
+        for i, const_index in enumerate(indices[index_offset:]):
+            self.cfdict[const_index] = self.amplitudes[i + index_offset] * ngsolve.cos(self.phases[i]) # phase for residual flow is not defined, therefore list index i without extra offset
+            self.cfdict[-const_index] = -self.amplitudes[i + index_offset] * ngsolve.sin(self.phases[i])
 
-            self.boundaryCFdict[i] = hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[i]}, default=0)
-            self.boundaryCFdict[-i] = hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[-i]}, default=0)
+            self.boundaryCFdict[const_index] = hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[const_index]}, default=0)
+            self.boundaryCFdict[-const_index] = hydro.mesh.BoundaryCF({BOUNDARY_DICT[SEA]: self.cfdict[-const_index]}, default=0)
 
 
 
