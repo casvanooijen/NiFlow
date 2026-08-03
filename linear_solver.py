@@ -61,14 +61,18 @@ def pypardiso_func(mat, vec, rcm=False):
 pypardiso_spsolve = Solver(pypardiso_func)
 
 
-def scipyLU_func(mat, vec, rcm=False):
+def scipyLU_func(mat, vec, rcm=False, factorization=None):
     if rcm:
         cmind = reverse_cuthill_mckee(mat)
         mat = mat[cmind[:, None], cmind]
         vec = vec[cmind]
         undo_cm = np.argsort(cmind)
 
-    solution = splin.spsolve(mat, vec)
+    if factorization is None:
+        solution = splin.spsolve(mat, vec)
+    else:
+        solution = factorization(vec)
+
     if rcm:
         solution = solution[undo_cm]
 
@@ -552,4 +556,72 @@ def make_block_utriangular_prec(system_matrix, momentum_block_size, mass_block_s
 
     block_diag_prec = Preconditioner(prec_step)
     return block_diag_prec  
+
+
+
+def solve_generalised_eigenvalue_problem(left_matrix, right_matrix, maxits=1000, eps=1e-10, print_its=False):
+    # initialisation
+    p = np.random.randn(left_matrix.shape[0])
+    p /= np.linalg.norm(p, 2)
+
+    y = np.zeros_like(p)
+
+    lam = 0
+
+    converged = False
+
+    # compute LU-factorisation of right_matrix
+    # Reverse Cuthill-McKee ordering
+
+    cmind = reverse_cuthill_mckee(right_matrix)
+    right_matrix = right_matrix[cmind[:, None], cmind]
+    undo_cm = np.argsort(cmind)
+
+    LU = splin.factorized(right_matrix)
+
+    for k in range(maxits):
+
+        if k >= 1:
+            p = y / np.linalg.norm(y, 2)
+
+        # y = splin.spsolve(right_matrix, left_matrix @ p)
+        rhs = (left_matrix @ p)[cmind]
+        y = scipyLU_solver.solve(right_matrix, rhs, rcm=False, factorization=LU)
+        y = y[undo_cm]
+        new_lam = (p.T @ y) / (p.T @ p)     
+
+        # stop criterion
+        if k >= 1:
+            stop_crit_value = abs(new_lam - lam) / abs(new_lam)
+            if print_its: print(f"it {k}: {new_lam} {stop_crit_value}")
+            if stop_crit_value <= eps:
+                converged = True
+                break
+
+        lam = copy(new_lam)
+  
+    return new_lam, converged
+
+
+# def solve_matrix_factorization(lhs, rhs, rcm=True):
+#     if rcm:
+#         cmind = reverse_cuthill_mckee(lhs)
+#         lhs = lhs[cmind[:, None], cmind]
+#         undo_cm = np.argsort(cmind)
+
+#     result = sp.lil_matrix(rhs.shape)
+#     LUfact = splin.factorized(lhs)
+#     for k in range(rhs.shape[1]):
+#         if rcm:
+#             vec_rhs = rhs[:, k][cmind]
+#         numpy_result = LUfact(vec_rhs.toarray())
+#         if rcm:
+#             result[:, k] = sp.lil_array(numpy_result[undo_cm].reshape((rhs.shape[0], 1)))
+#         else:
+#             result[:, k] = sp.lil_array(numpy_result.reshape((rhs.shape[0], 1)))
+#     return result.tocsc()
+
+
+
+
 

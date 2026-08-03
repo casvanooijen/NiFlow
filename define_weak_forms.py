@@ -68,7 +68,6 @@ def construct_linearised_weak_form(weak_form, model_options, geometric_informati
         constructor.add_internal_river_boundary_condition_linearised(dirac_delta_width=delta_width, Q0=Q0)
 
 
-
 class WeakFormConstructor(object):
 
     # Idea for application of non-linear weak form: make new functions for the basic weak form terms (double-product etc.), and rewrite the equation term functions with a modifier that chooses the basic function that corresponds to the operation you want to do
@@ -85,10 +84,10 @@ class WeakFormConstructor(object):
                  forcing_alpha=None, forcing_beta=None, forcing_gamma=None,forcing_Q = None,
                  oseen_linearisation=False, linear_form=None):
         
-        '''as_forcing_list and include_in_LHS_list must have an empty intersection'''
+        '''as_forcing_list and include_in_LHS_list must have an empty intersection; manufactured solutions work only for boundary treatment == 'simple' '''
         
         self.weak_form = weak_form
-        self.linear_form = linear_form # used for forcing decomposition
+        self.linear_form = linear_form # used for forcing decomposition, the natural boundary condition, and manufactured solutions
         
         self.internal_sea_bc = (model_options['sea_boundary_treatment'] == 'exact')
         self.internal_river_bc = (model_options['river_boundary_treatment'] == 'exact')
@@ -375,7 +374,7 @@ class WeakFormConstructor(object):
                                                        trial_function_1_previous * trial_function_2 * trial_function_3_previous_grad[direction]) * test_function * ngsolve.dx
         
 
-    def add_forcing(self, forcing_cf, test_function, side='lhs'):
+    def add_body_forcing(self, forcing_cf, test_function, side='lhs'):
         """Can also be used for terms like Coriolis and vertical eddy viscosity: terms of the form (u, v) or (forcing, v). This function just adds a function times the test function and integrates."""
         if side == 'lhs':
             self.weak_form += forcing_cf * test_function * ngsolve.dx
@@ -419,14 +418,14 @@ class WeakFormConstructor(object):
         Hy = self.spatial_parameters_grad['H'][1].Compile() / self.y_scaling
 
         for m in range(self.M):
-            self.add_forcing(0.5 * G4(m) * Hx * alpha[m][l], self.DIC_test_functions[l], side)
-            self.add_forcing(0.5 * G4(m) * Hy * beta[m][l], self.DIC_test_functions[l], side)
+            self.add_body_forcing(0.5 * G4(m) * Hx * alpha[m][l], self.DIC_test_functions[l], side)
+            self.add_body_forcing(0.5 * G4(m) * Hy * beta[m][l], self.DIC_test_functions[l], side)
             self.add_horizontal_derivative(0.5 * G4(m) * H, 0, alpha[m][l], self.DIC_test_functions[l], side)
             self.add_horizontal_derivative(0.5 * G4(m) * H, 1, beta[m][l], self.DIC_test_functions[l], side)
 
             if self.internal_river_bc and l == 0:
-                self.add_forcing(0.5 * G4(m) * Hx * river_bc_coef[m][l], self.DIC_test_functions[l], side)
-                self.add_forcing(0.5 * G4(m) * H * river_bc_coef_x[m][l], self.DIC_test_functions[l], side)
+                self.add_body_forcing(0.5 * G4(m) * Hx * river_bc_coef[m][l], self.DIC_test_functions[l], side)
+                self.add_body_forcing(0.5 * G4(m) * H * river_bc_coef_x[m][l], self.DIC_test_functions[l], side)
 
 
     def add_stokes_transport(self, l: int, forcing={'surface': 0, 'velocity': 0}):
@@ -517,7 +516,7 @@ class WeakFormConstructor(object):
         self.add_time_derivative(proj_coef * H * sigma, flow_variable[p][l], flow_variable[p][-l], test_function[p][l], test_function[p][-l], side)
 
 
-    def add_time_derivative_surface_interactions(self, p: int, l: int, enum_l: int, equation = 'u', forcing={'surface': 0, 'velocity':0}):
+    def add_time_derivative_surface_interactions(self, p: int, l: int, equation = 'u', forcing={'surface': 0, 'velocity':0}):
         """l must be a positive integer!"""
         
         alpha = self.forcing_alpha[forcing['velocity'] - 1] if forcing['velocity'] > 0 else self.alpha
@@ -548,7 +547,7 @@ class WeakFormConstructor(object):
                         self.add_double_product(eps * self.ramp * sigma * vertical_proj_coef * H4(i,j,l), flow_variable[p][i], gamma[j], test_function[p][l], side)
 
 
-    def add_time_derivative_surface_interactions_linearised(self, p: int, l: int, enum_l:int, equation='u', Q0=None):
+    def add_time_derivative_surface_interactions_linearised(self, p: int, l: int, equation='u', Q0=None):
         eps = self.constant_parameters['surface_epsilon']
         sigma = self.constant_parameters['sigma']
 
@@ -592,10 +591,10 @@ class WeakFormConstructor(object):
         H = self.spatial_parameters['H'].Compile()
         proj_coef = 0.5 * self.vertical_basis.inner_product(p, p) # product of time- and vertical projection coefficient
 
-        self.add_forcing(H * proj_coef * parameter * flow_variable, test_function, side)
+        self.add_body_forcing(H * proj_coef * parameter * flow_variable, test_function, side)
         
         if self.internal_river_bc and equation == 'v' and l == 0:
-            self.add_forcing(H * proj_coef * parameter * river_bc_coef[p][l], test_function, side)
+            self.add_body_forcing(H * proj_coef * parameter * river_bc_coef[p][l], test_function, side)
 
     
     def add_coriolis_surface_interaction(self, p: int, l: int, equation='u', forcing={'surface': 0, 'velocity':0}):
@@ -669,10 +668,10 @@ class WeakFormConstructor(object):
         self.add_horizontal_derivative(-g * H * proj_coef, direction, test_function, gamma[l], side)
         if equation == 'u':
             # self.weak_form += -g * side_factor * proj_coef * test_function * gamma[l] * Hx * ngsolve.dx
-            self.add_forcing(-g * proj_coef * gamma[l] * Hx, test_function, side)
+            self.add_body_forcing(-g * proj_coef * gamma[l] * Hx, test_function, side)
         else:
             # self.weak_form += -g * side_factor * proj_coef * test_function * gamma[l] * Hy * ngsolve.dx
-            self.add_forcing(-g * proj_coef * gamma[l] * Hy, test_function, side)
+            self.add_body_forcing(-g * proj_coef * gamma[l] * Hy, test_function, side)
         # -\int gH zeta * div(v)
 
         
@@ -682,7 +681,6 @@ class WeakFormConstructor(object):
         g = self.constant_parameters['g']
         H = self.spatial_parameters['H'].Compile()
         side = 'rhs' if forcing['surface'] > 0 else 'lhs'
-
         test_function = self.umom_test_functions[p][l]
 
         # -\int_{Gamma_s} gH A * u * nds (u points inward, so outward normal adds extra minus sign)
@@ -697,9 +695,10 @@ class WeakFormConstructor(object):
                 A = -self.constant_parameters['seaward_amplitudes'][self.time_indices.index(abs(l))] * ngsolve.sin(self.constant_parameters['seaward_phases'][self.time_indices.index(abs(l)) - int(0 in self.time_indices)])
             
             self.add_boundary_forcing(-g * H * 1/self.x_scaling * proj_coef * A, test_function, BOUNDARY_DICT[SEA], side)
+        elif self.manufactured_solution is not None:
+            self.add_boundary_forcing(-g * H * 1/self.x_scaling * proj_coef * self.manufactured_gamma[l], test_function, BOUNDARY_DICT[SEA], side)
         else:
             self.add_boundary_forcing(-g * H * 1/self.x_scaling * proj_coef * self.forcing_gamma[forcing['surface'] - 1][l], test_function, BOUNDARY_DICT[SEA], side)
-        # check if this is really only integrating along the sea boundary!!!!
 
 
     def add_barotropic_pressure_gradient_surface_interaction(self, p: int, l: int, equation='u', forcing={'surface_1': 0, 'surface_2':0}):
@@ -758,7 +757,7 @@ class WeakFormConstructor(object):
 
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
 
-        self.add_forcing(proj_coef * H**2 * density_gradient, test_function, side)
+        self.add_body_forcing(proj_coef * H**2 * density_gradient, test_function, side)
 
 
     def add_baroclinic_pressure_gradient_surface_interaction(self, p: int, l: int, equation='u', forcing={'surface': 0, 'velocity':0}):
@@ -780,7 +779,7 @@ class WeakFormConstructor(object):
 
         # linear surface interaction 2 * H * zeta
         if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(l))]: 
-            self.add_forcing(vertical_proj_coef * eps * H * density_gradient * gamma[l], test_function, side)
+            self.add_body_forcing(vertical_proj_coef * eps * H * density_gradient * gamma[l], test_function, side)
 
         # non-linear surface interaction zeta**2
         for i in self.fourier_indices:
@@ -803,7 +802,7 @@ class WeakFormConstructor(object):
 
         # linear surface interaction 2 * H * zeta; unchanged here in linearisation because already linear
         if self.surface_matrix[self.time_indices.index(abs(l)), self.time_indices.index(abs(l))]: 
-            self.add_forcing(vertical_proj_coef * eps * H * density_gradient * self.gamma[l], test_function)
+            self.add_body_forcing(vertical_proj_coef * eps * H * density_gradient * self.gamma[l], test_function)
 
         # non-linear surface interaction zeta**2
         for i in self.fourier_indices:
@@ -827,14 +826,14 @@ class WeakFormConstructor(object):
         test_function = self.umom_test_functions[p][l] if equation == 'u' else self.vmom_test_functions[p][l]
 
         if self.model_options['veddy_viscosity_assumption'] == 'depth-scaled&constantprofile':
-            self.add_forcing(-proj_coef * Av * flow_variable, test_function, side)
+            self.add_body_forcing(-proj_coef * Av * flow_variable, test_function, side)
             if self.internal_river_bc and l == 0 and equation == 'u':
-                self.add_forcing(-proj_coef * Av * river_bc_coef[p][l], test_function, side)
+                self.add_body_forcing(-proj_coef * Av * river_bc_coef[p][l], test_function, side)
         elif self.model_options['veddy_viscosity_assumption'] == 'constant':
             H = self.spatial_parameters['H'].Compile()
-            self.add_forcing(-proj_coef * Av * flow_variable / H, test_function, side)
+            self.add_body_forcing(-proj_coef * Av * flow_variable / H, test_function, side)
             if self.internal_river_bc and l == 0 and equation == 'u':
-                self.add_forcing(-proj_coef * Av * river_bc_coef[p][l] / H, test_function, side)
+                self.add_body_forcing(-proj_coef * Av * river_bc_coef[p][l] / H, test_function, side)
 
 
     def add_horizontal_eddy_viscosity(self, p: int, l: int, equation='u', forcing={'surface': 0, 'velocity': 0}):
@@ -862,7 +861,7 @@ class WeakFormConstructor(object):
 
         if self.internal_river_bc and equation == 'u' and l == 0:
             self.add_horizontal_derivative(proj_coef * Ah * H, 0, test_function, river_bc_coef_x[p][l], side) # sub test function at trial function spot because test function needs to be differentiated and trial function is analytically differentiated, so no differentiation in the assembly.
-            self.add_forcing(proj_coef * Ah * Hx * river_bc_coef_x[p][l], test_function, side)
+            self.add_body_forcing(proj_coef * Ah * Hx * river_bc_coef_x[p][l], test_function, side)
 
     
     def add_horizontal_eddy_viscosity_surface_interactions(self, p: int, l: int, equation='u', forcing={'surface': 0, 'velocity': 0}):
@@ -1379,23 +1378,23 @@ class WeakFormConstructor(object):
                                         (4/(dirac_delta_width**2)) * (dirac_delta_width / 2 - ngsolve.sqrt((ngsolve.x)**2)),
                                         0) # Hat function Dirac Delta
         if 0 in self.time_indices:
-            self.add_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
-            self.add_forcing(-amplitudes[0] * dirac_delta_sea * np.sqrt(2), self.sea_bc_test_functions[0])
+            self.add_body_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
+            self.add_body_forcing(-amplitudes[0] * dirac_delta_sea * np.sqrt(2), self.sea_bc_test_functions[0])
 
         for l in self.time_indices[int(0 in self.time_indices):]:
             if amplitudes[self.time_indices.index(l)] == 0:
-                self.add_forcing((self.gamma[l]) * dirac_delta_sea, self.sea_bc_test_functions[l])
-                self.add_forcing((self.gamma[-l]) * dirac_delta_sea, self.sea_bc_test_functions[-l])
+                self.add_body_forcing((self.gamma[l]) * dirac_delta_sea, self.sea_bc_test_functions[l])
+                self.add_body_forcing((self.gamma[-l]) * dirac_delta_sea, self.sea_bc_test_functions[-l])
             else:
                 # add highly non-linear weak form that we do not have a ready-made function for already
                 # amplitude equation
                 self.weak_form += ngsolve.sqrt((self.gamma[-l])**2 +
                                                (self.gamma[l])**2) * dirac_delta_sea * self.sea_bc_test_functions[-l] * ngsolve.dx
-                self.add_forcing(-amplitudes[self.time_indices.index(l)] * dirac_delta_sea, self.sea_bc_test_functions[-l])
+                self.add_body_forcing(-amplitudes[self.time_indices.index(l)] * dirac_delta_sea, self.sea_bc_test_functions[-l])
                 # phase equation
                 self.weak_form += ngsolve.atan2(-(self.gamma[-l]), self.gamma[l]) * \
                                   dirac_delta_sea * self.sea_bc_test_functions[l] * ngsolve.dx
-                self.add_forcing(-phases[self.time_indices.index(l) - int(0 in self.time_indices)] * dirac_delta_sea, self.sea_bc_test_functions[l])
+                self.add_body_forcing(-phases[self.time_indices.index(l) - int(0 in self.time_indices)] * dirac_delta_sea, self.sea_bc_test_functions[l])
 
 
     def add_internal_sea_boundary_condition_linearised(self, dirac_delta_width=0.05):
@@ -1406,24 +1405,24 @@ class WeakFormConstructor(object):
                                         (4/(dirac_delta_width**2)) * (dirac_delta_width / 2 - ngsolve.sqrt((ngsolve.x)**2)),
                                         0) # Hat function Dirac Delta
         if 0 in self.time_indices:
-            self.add_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
+            self.add_body_forcing((self.gamma[0]) * dirac_delta_sea, self.sea_bc_test_functions[0])
 
         # sea_bc_coef_0 = {l: A0[l] * self.sea_interpolant for l in range(-self.imax, self.imax + 1)}
 
         for l in self.time_indices[int(0 in self.time_indices):]:
             if amplitudes[self.time_indices.index(l)] == 0:
-                self.add_forcing((self.gamma[l]) * dirac_delta_sea, self.sea_bc_test_functions[l])
-                self.add_forcing((self.gamma[-l]) * dirac_delta_sea, self.sea_bc_test_functions[-l])
+                self.add_body_forcing((self.gamma[l]) * dirac_delta_sea, self.sea_bc_test_functions[l])
+                self.add_body_forcing((self.gamma[-l]) * dirac_delta_sea, self.sea_bc_test_functions[-l])
             else:
                 # amplitude equation linearisation
-                self.add_forcing(dirac_delta_sea / ngsolve.sqrt((self.gamma0[-l])**2 + (self.gamma0[l])**2) * 
+                self.add_body_forcing(dirac_delta_sea / ngsolve.sqrt((self.gamma0[-l])**2 + (self.gamma0[l])**2) * 
                                  (self.gamma0[l]) * (self.gamma[l]), self.sea_bc_test_functions[-l])
-                self.add_forcing(dirac_delta_sea / ngsolve.sqrt((self.gamma0[-l])**2 + (self.gamma0[l])**2) * 
+                self.add_body_forcing(dirac_delta_sea / ngsolve.sqrt((self.gamma0[-l])**2 + (self.gamma0[l])**2) * 
                                  (self.gamma0[-l]) * (self.gamma[-l]), self.sea_bc_test_functions[-l])
                 # phase equation linearisation
-                self.add_forcing(-dirac_delta_sea / ((self.gamma0[l]) * (1 + ((self.gamma0[-l])**2 / (self.gamma0[l])**2))) * 
+                self.add_body_forcing(-dirac_delta_sea / ((self.gamma0[l]) * (1 + ((self.gamma0[-l])**2 / (self.gamma0[l])**2))) * 
                                  (self.gamma[-l]), self.sea_bc_test_functions[l])
-                self.add_forcing(dirac_delta_sea * (self.gamma0[-l]) / ((self.gamma0[-l])**2 + (self.gamma0[l])**2) * 
+                self.add_body_forcing(dirac_delta_sea * (self.gamma0[-l]) / ((self.gamma0[-l])**2 + (self.gamma0[l])**2) * 
                                  (self.gamma[l]), self.sea_bc_test_functions[l])
 
 
@@ -1442,9 +1441,9 @@ class WeakFormConstructor(object):
         if 0 in self.time_indices:
             for m in range(self.M):
                 proj_coef = 0.5 * np.sqrt(2) * G4(m)
-                self.add_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
+                self.add_body_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
 
-            self.add_forcing(discharge * dirac_delta_river, self.river_bc_test_functions[0]) 
+            self.add_body_forcing(discharge * dirac_delta_river, self.river_bc_test_functions[0]) 
 
         # non-linear part (transport through cross-section from z=0 till z=zeta)
 
@@ -1481,7 +1480,7 @@ class WeakFormConstructor(object):
         if 0 in self.time_indices:
             for m in range(self.M):
                 proj_coef = 0.5 * np.sqrt(2) * self.vertical_basis.tensor_dict['G4'](m)
-                self.add_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
+                self.add_body_forcing(self.y_scaling * H * dirac_delta_river * proj_coef * (self.alpha[m][0] + self.river_bc_trial_functions[m][0]), self.river_bc_test_functions[0])
 
         # non-linear part (transport through cross-section from z=0 till z=zeta)
 

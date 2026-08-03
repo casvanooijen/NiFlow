@@ -4,7 +4,7 @@ from scipy.sparse.linalg import spsolve
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 import timeit
 import ngsolve
-import copy
+from copy import *
 import matplotlib.pyplot as plt
 from contextlib import nullcontext
 
@@ -14,9 +14,10 @@ from NiFlow.utils import *
 from NiFlow.linear_solver import *
 
 
-def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-12, linear_solver = 'pypardiso', preconditioner = 'identity',
+def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-12, linear_solver = 'pypardiso',
           continuation_parameters: dict = {'advection_epsilon': [1], 'surface_epsilon': [1], 'Av': [1], 'Ah': [1]}, stopcriterion = 'scaled_2norm',
-          plot_intermediate_results='none', num_threads=1, static_condensation=False, matrix_analysis=False, print_log:bool=True, reduce_bandwidth:bool=False, oseen_linearisation=False):
+          plot_intermediate_results='none', num_threads=1, static_condensation=False, matrix_analysis=False, print_log:bool=True, reduce_bandwidth:bool=False,
+          manufactured_solution: dict=None):
 
     """
     
@@ -29,7 +30,6 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
         - max_iterations (int):             maximum number of Newton iterations per continuation step;
         - tolerance (float):                if the stopping criterion is less than this value, the Newton method terminates and the procedure moves to the next continuation step;
         - linear_solver:                    choice of linear solver; options: 'pardiso', 'pypardiso', 'scipy_direct', 'bicgstab', 'gmres', 'uzawa'
-        - preconditioner:                   choice of preconditioner; options: 'identity', 'block_diagonal_diagonal', 'block_diagonal_utriangular', 'block_diagonal_ltriangular'
         - continuation_parameters (dict):   dictionary with keys 'advection_epsilon' and 'Av' and 'Ah', with values indicating what the default value of these parameters should be multiplied by in each continuation step;
         - stopcriterion:                    choice of stopping criterion; options: 'relative_residual_norm', 'matrix_norm', 'scaled_2norm', 'relative_newtonstepsize';
         - plot_intermediate_results:        indicates whether intermediate results should be plotted and saved; options: 'none' (default), 'all' and 'overview'.
@@ -38,6 +38,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
         - matrix_analysis:                  if True, plots the non-zero elements of the matrix, the size of all entries via a colormap, and the right-hand side vector using a colormap.
         - print_log:                        if True, prints runtimes of the steps of the solution process, as well as stopping criterion values.
         - reduce_bandwidth:                 if True, applies the reverse Cuthill-McKee algorithm to the matrix and right-hand side vector.
+        - manufactured_solution:            dict of ngsolve.CoefficientFunctions or None. If not None, will set up the right-hand side to take into account this manufactured solution.
     
     """
 
@@ -91,12 +92,12 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             
     hydro.solution_gf = sol 
 
-    # Save true values of advection_epsilon and Av before modifying them in the continuation (homology) method
+    # Save true values of advection_epsilon and Av before modifying them in the continuation (homotopy) method
 
-    true_epsilon = copy.copy(hydro.constant_physical_parameters['advection_epsilon'])
-    true_surface_epsilon = copy.copy(hydro.constant_physical_parameters['surface_epsilon'])
-    true_Av = copy.copy(hydro.constant_physical_parameters['Av'])
-    true_Ah = copy.copy(hydro.constant_physical_parameters['Ah'])
+    true_epsilon = copy(hydro.constant_physical_parameters['advection_epsilon'])
+    true_surface_epsilon = copy(hydro.constant_physical_parameters['surface_epsilon'])
+    true_Av = copy(hydro.constant_physical_parameters['Av'])
+    true_Ah = copy(hydro.constant_physical_parameters['Ah'])
 
     for continuation_counter in range(num_continuation_steps):
         hydro.constant_physical_parameters['advection_epsilon'] = true_epsilon * continuation_parameters['advection_epsilon'][continuation_counter]
@@ -112,9 +113,16 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
         with context:
             hydro.setup_weak_form(static_condensation=static_condensation)
 
+
+        # Interpolate manufactured solution to fes
+        if manufactured_solution is not None:
+            interpolated_manufactured_solution = hydro.fespace_interpolate(manufactured_solution['u'], manufactured_solution['v'], manufactured_solution['z'])
+            manufactured_rhs = hydro.solution_gf.vec.CreateVector()
+            hydro.total_bilinearform.Apply(interpolated_manufactured_solution.vec, manufactured_rhs)
+
         # Start the Newton method
 
-        previous_iterate = copy.copy(hydro.solution_gf)
+        previous_iterate = copy(hydro.solution_gf)
 
         for newton_counter in range(max_iterations):
             if print_log:
@@ -149,7 +157,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                                             hydro.umom_testfunctions, hydro.vmom_testfunctions, hydro.DIC_testfunctions,
                                                             A_trial_functions=A_trial_functions, Q_trial_functions=Q_trial_functions, Q0 = Q0,
                                                             sea_bc_test_functions=sea_bc_test_functions, river_bc_test_functions=river_bc_test_functions,
-                                                            normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full', oseen_linearisation=oseen_linearisation,
+                                                            normal_alpha=normal_alpha, normal_alpha_y=normal_alpha_y, operator='full',
                                                             forcing_instruction=hydro.forcing_instruction)
 
 
@@ -179,13 +187,19 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                     print(f'{i}: maximum is {np.amax(np.absolute(mat[i, :]))}')
                 # im = ax[1].imshow(mat, cmap='RdBu', vmin = -np.amax(np.absolute(mat)), vmax = np.amax(np.absolute(mat)))
                 print(f"Largest matrix element has magnitude {np.amax(np.absolute(mat))}")
+                
 
             # Solve linearisation
+
             if print_log:
                 rhs_creation_start = timeit.default_timer()
             rhs = hydro.solution_gf.vec.CreateVector()
             with context:
                 hydro.total_bilinearform.Apply(hydro.solution_gf.vec, rhs)
+
+            # Subtract manufactured solution from the residual
+            if manufactured_solution is not None:
+                rhs -= manufactured_rhs
 
             if print_log:
                 print(f"    Construction of right-hand side vector took {np.round(timeit.default_timer() - rhs_creation_start, 3)} seconds")
@@ -220,13 +234,16 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                                 if str(ctype) == "COUPLING_TYPE.LOCAL_DOF":
                                     num_local_dofs = dof_types[ctype]
                             print(f"    Number of effective degrees of freedom (non-local dofs) equal to {hydro.nfreedofs - num_local_dofs}.")
+                        hydro.ndofs_effective = hydro.nfreedofs - num_local_dofs
                     else:
                         du.vec.data += a.mat.Inverse(freedofs=hydro.femspace.FreeDofs(), inverse='pardiso') * rhs
+                        hydro.ndofs_effective = hydro.nfreedofs
 
             elif linear_solver == 'scipy_direct':
                 solver = scipyLU_solver
                 sol = solver.solve(mat, rhs_arr, rcm=reduce_bandwidth)
                 du.vec.FV().NumPy()[freedof_list] = sol
+                
             elif linear_solver == 'pypardiso':
                 solver = pypardiso_spsolve
                 sol = solver.solve(mat, rhs_arr, rcm=reduce_bandwidth) 
@@ -247,6 +264,10 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
             apply_start = timeit.default_timer()
             with context:
                 hydro.total_bilinearform.Apply(hydro.solution_gf.vec, residual)
+
+            # subtract manufactured solution from residual
+            if manufactured_solution is not None:
+                residual -= manufactured_rhs
             
             apply_time = timeit.default_timer() - apply_start
             if print_log:
@@ -327,7 +348,7 @@ def solve(hydro: Hydrodynamics, max_iterations: int = 10, tolerance: float = 1e-
                     print('Newton-Raphson method converged')
                 break
             else:
-                previous_iterate = copy.copy(hydro.solution_gf)
+                previous_iterate = copy(hydro.solution_gf)
     if print_log:
         hydro.restructure_solution() #
         hydro.get_gradients(compiled=True) 
@@ -435,3 +456,6 @@ def compile_previous_newton_iterate(hydro: Hydrodynamics):
         for m in range(hydro.numerical_information['M']):
             hydro.alpha_solution[m][i].Compile()
             hydro.beta_solution[m][i].Compile()
+
+
+

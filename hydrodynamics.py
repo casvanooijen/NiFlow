@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 
 import NiFlow.truncationbasis.truncationbasis as truncationbasis
+from NiFlow.truncationbasis.integrationtools import *
 from NiFlow.geometry.create_geometry import parametric_geometry, RIVER, SEA, WALL, WALLUP, WALLDOWN, BOUNDARY_DICT
 from NiFlow.geometry.meshing import generate_mesh
 from NiFlow.geometry.geometries import *
@@ -15,6 +16,8 @@ import NiFlow.define_weak_forms as weakforms
 from NiFlow.utils import *
 from NiFlow.linear_solver import *
 
+
+KNOWN_ELEMENTS = ['simple', 'taylor_hood', 'MINI']
 
 def select_model_options(bed_bc:str = 'partial_slip', veddy_viscosity_assumption:str = 'depth-scaled&constantprofile',
                          advection_influence_matrix: np.ndarray = None, sea_boundary_treatment:str = 'exact',
@@ -103,7 +106,7 @@ def set_geometric_information(domain_shape: str, shape_parameters: tuple, x_scal
 
 
 def set_numerical_information(M, constituent_indices:list, order, grid_size, mesh_generation_method, element_type, continuation_parameters={'advection_epsilon': [1], 'Av': [1], 'Ah': [1]}):
-    """Returns dictionary of numerical information, associated to the meshing and the Finite Element formulation
+    f"""Returns dictionary of numerical information, associated to the meshing and the Finite Element formulation
     
     Arguments:
     
@@ -112,18 +115,18 @@ def set_numerical_information(M, constituent_indices:list, order, grid_size, mes
     - order:                            order of the finite element basis.
     - grid_size:                        grid size used for mesh; if a structured approach is used, then supply a tuple for this variable, which leads to grid_size[0] cells in the y-direction and grid_size[1] cells in the x-direction.                                                         
     - mesh_generation_method:           method by which the mesh is generated; options: 'structured_quads', 'structured_tri_AQ', 'structured_tri_DQ', 'structured_tri_CCQ', 'unstructured'.
-    - element_type:                     type of finite element formulation used: 'simple', 'taylor-hood', or 'MINI'.
+    - element_type:                     type of finite element formulation used: {KNOWN_ELEMENTS}.
     - continuation_parameters:          dictionary specifying how continuation will be applied for the Newton method; continuation is possible with
                                         advection_epsilon, vertical eddy viscosity, and horizontal eddy viscosity.
     
     """
 
-    if element_type == 'MINI' and mesh_generation_method == 'structured_quads':
-        raise ValueError("Cannot use the MINI element for quadrilateral mesh. Please use 'taylor-hood' instead.")
+    if element_type not in KNOWN_ELEMENTS:
+        raise ValueError(f"Element {element_type} not in known elements {KNOWN_ELEMENTS}; perhaps you misspelled?")
     
     if mesh_generation_method == 'unstructured':
         if isinstance(grid_size, tuple):
-            raise ValueError("For unstructured grids, provide a single float that denotes the size of gridcells.")
+            raise ValueError("For unstructured grids, provide a single float that denotes the size of grid cells.")
     else:
         if not isinstance(grid_size, tuple):
             raise ValueError("For structuref grids, provide a tuple denoting the number of grid cells in each direction")
@@ -317,6 +320,8 @@ class Hydrodynamics(object):
 
         self.nfreedofs = count_free_dofs(self.femspace)
 
+        self.index_map_alpha, self.index_map_beta, self.index_map_gamma, self.index_map_A, self.index_map_Q = self._generate_index_map()
+
         self.forcing_instruction = forcing_instruction
         # these are only used in the child class DecomposedHydrodynamics and are defined here to prevent exceptions
         self.is_decomposed = False
@@ -335,7 +340,8 @@ class Hydrodynamics(object):
 
 
     def _set_riverine_boundary_condition(self, **kwargs):
-        """Sets riverine boundary condition assuming that the depth-averaged along-channel velocity scales linearly with local depth. Only total river discharge (dimensional)
+        """Sets riverine boundary condition assuming that the depth-averaged along-channel velocity scales linearly with local depth; this is a profile that is 
+        obtained from a simplified analytical model, which will be quite close to the real profile, decreasing boundary layer strength. Only total river discharge (dimensional)
         needs to be provided. If in **kwargs, manual is set to True, a user-provided lateral distribution of the discharge is used instead.
         
         """
@@ -352,24 +358,20 @@ class Hydrodynamics(object):
 
         u_dirichlet = f"{BOUNDARY_DICT[RIVER]}" if self.model_options['wall_boundary_condition'] == 'free_slip' else f"{BOUNDARY_DICT[RIVER]}|{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}"
         
-        self.U = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=u_dirichlet)  # make sure that zero-th order is not used for the free surface
-        self.V = ngsolve.H1(self.mesh, order= 2 if (self.numerical_information['element_type'] == 'taylor-hood' and self.numerical_information['order']==1) else self.numerical_information['order'], dirichlet=f"{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}")
+        self.U = ngsolve.H1(self.mesh, order=self.numerical_information['order'] + int(self.numerical_information['element_type'] == 'taylor_hood'), dirichlet=u_dirichlet)  # make sure that zero-th order is not used for the free surface
+        self.V = ngsolve.H1(self.mesh, order=self.numerical_information['order'] + int(self.numerical_information['element_type'] == 'taylor_hood'), dirichlet=f"{BOUNDARY_DICT[WALLDOWN]}|{BOUNDARY_DICT[WALLUP]}")
 
-        # add interior bubble functions if MINI-elements are used
+        # add interior bubble functions if MINI-elements are used   
         if self.numerical_information['element_type'] == 'MINI':
-            self.U.SetOrder(ngsolve.TRIG, 3 if self.numerical_information['order'] == 1 else self.numerical_information['order'] + 1)
-            self.V.SetOrder(ngsolve.TRIG, 3 if self.numerical_information['order'] == 1 else self.numerical_information['order'] + 1)
+            self.U.SetOrder(ngsolve.TRIG, self.numerical_information['order'] + 2 if self.numerical_information['mesh_generation_method'] != 'structured_quads' else self.numerical_information['order'] + 1)
+            self.V.SetOrder(ngsolve.TRIG, self.numerical_information['order'] + 2 if self.numerical_information['mesh_generation_method'] != 'structured_quads' else self.numerical_information['order'] + 1)
 
             self.U.Update()
             self.V.Update()
 
-        
 
-        # define Z-space with order one less than velocity space in case of Taylor-Hood elements or MINI (k>1) elements
-        if ((self.numerical_information['element_type'] == 'taylor-hood') or (self.numerical_information['element_type'] == 'MINI')) and self.numerical_information['order'] > 1:
-            self.Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'] - 1)
-        else:
-            self.Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'])
+        # define Z-space with order one less than velocity space in case of Taylor-Hood elements or MINI (k>1) or Brezzi-PK elements
+        self.Z = ngsolve.H1(self.mesh, order=self.numerical_information['order'])
 
         self.ndofs_alpha = self.U.ndof
         self.ndofs_beta = self.V.ndof
@@ -393,8 +395,13 @@ class Hydrodynamics(object):
         list_of_spaces = [self.U for _ in range(M*num_fourier_coefficients)]
         for _ in range(M*num_fourier_coefficients): 
             list_of_spaces.append(self.V)
-        for _ in range(num_fourier_coefficients):
-            list_of_spaces.append(self.Z)
+
+        self.Vprod = ngsolve.FESpace(list_of_spaces)
+
+        Q_list = [self.Z for _ in range(num_fourier_coefficients)]
+        self.Qprod = ngsolve.FESpace(Q_list)
+        list_of_spaces += Q_list
+
 
         if self.model_options['sea_boundary_treatment'] == 'exact' and self.model_options['river_boundary_treatment'] == 'exact': # if we treat the boundary on both sides
             for _ in range(num_fourier_coefficients + 1): # only one dimension for scalar Q
@@ -466,6 +473,10 @@ class Hydrodynamics(object):
         return alpha, beta, gamma, A, Q
 
 
+    def _generate_index_map(self):
+        data = list(range(len(self.femspace.components)))
+        return self._single_index_data_to_double_index(data)
+
 
     def _setup_TnT(self):
         """Sorts the ngsolve Trial and Test functions into intuitive dictionaries. If you ever want to change the block structure of the matrix, this is the function to modify."""
@@ -506,6 +517,7 @@ class Hydrodynamics(object):
 
         self.total_bilinearform = a_total
 
+
     def restructure_solution(self):
         """Associates each part of the solution gridfunction vector to a Fourier and vertical eigenfunction pair. Very similar to function _setup_TnT(). Can probably prevent code duplication"""
 
@@ -516,7 +528,38 @@ class Hydrodynamics(object):
                 self.Q_solution[-const_index] = 0
 
 
+    def fespace_interpolate(self, u, v, surface, num_GLL_points=None):
+        """Interpolates a coefficient function into the discretization spaces"""
+        gf = ngsolve.GridFunction(self.femspace)
+        if num_GLL_points is None:
+            num_GLL_points = self.numerical_information['M'] + 10
+
+        alpha_map, beta_map, gamma_map, _, _ = self._generate_index_map()
+        GLL_points = get_GLL_points(num_GLL_points)
+        integration_points = map_GLL_points(GLL_points, -1, 0)
+        
+        for l, surf in surface.items():
+            gf.components[gamma_map[l]].Interpolate(surf)
+
+        for l, uvel in u.items():
+            vvel = v[l]
+            for p in range(self.numerical_information['M']):
+                u_values = []
+                v_values = []
+                for point in integration_points:
+                    u_values.append(uvel(point) * self.vertical_basis.evaluation_function(point, p))
+                    v_values.append(vvel(point) * self.vertical_basis.evaluation_function(point, p))
+            
+                u_coefficient = GLL_integrate(u_values, GLL_points, xl=-1, xr=0) / self.vertical_basis.inner_product(p, p)
+                v_coefficient = GLL_integrate(v_values, GLL_points, xl=-1, xr=0) / self.vertical_basis.inner_product(p, p)
+                gf.components[alpha_map[p][l]].Interpolate(u_coefficient)
+                gf.components[beta_map[p][l]].Interpolate(v_coefficient)
+
+        return gf        
+
+
     def get_gradients(self, compiled=True):
+        """Pre-computes gradients of the solution field."""
         M = self.numerical_information['M']
         indices = self.numerical_information['constituent_indices']
 
@@ -532,6 +575,100 @@ class Hydrodynamics(object):
                 self.beta_grad[m][i] = ngsolve.grad(self.beta_solution[m][i]).Compile() if compiled else ngsolve.grad(self.beta_solution[m][i])
                 self.alpha_grad[m][-i] = ngsolve.grad(self.alpha_solution[m][-i]).Compile() if compiled else ngsolve.grad(self.alpha_solution[m][-i])
                 self.beta_grad[m][-i] = ngsolve.grad(self.beta_solution[m][-i]).Compile() if compiled else ngsolve.grad(self.beta_solution[m][-i])
+
+
+    def get_matrix_B(self):
+        """Extracts matrix B from the bilinear form"""
+        self.total_bilinearform.Assemble()
+        system_matrix = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(self.total_bilinearform.mat), get_freedof_list(self.femspace.FreeDofs()))
+        return system_matrix[(self.nfreedofs_u + self.nfreedofs_v):, :(self.nfreedofs_u + self.nfreedofs_v)]
+    
+
+    def compute_numerical_inf_sup_constant(self, v_norm='H1_3d', maxits=1000, eps=1e-10, **kwargs):
+        """Solve generalised eigenvalue problem to obtain numerical inf-sup constant. Uses inverse iteration to compute smallest eigenvalue. Returns square root of this smallest
+        eigenvalue, and True if the method converged. Operations are carried out in scipy on the system with Dirichlet degrees of freedom removed."""
+
+        B = self.get_matrix_B()
+        Bt = B.transpose()
+
+        # Assemble inner products
+        V_trial, V_test = self.Vprod.TnT()
+        V_inner_prod = ngsolve.BilinearForm(self.Vprod)
+        if v_norm == 'H1_product':
+            V_inner_prod += sum(trial * test * ngsolve.dx for trial, test in zip(V_trial, V_test))
+            V_inner_prod += sum(ngsolve.grad(trial) * ngsolve.grad(test) * ngsolve.dx for trial, test in zip(V_trial, V_test))
+        else:
+            fourier_coefficients = constituent_indices_to_fourier_indices(self.numerical_information['constituent_indices'])
+            for l in fourier_coefficients:
+                for m in range(self.numerical_information['M']):
+                    V_inner_prod += self.vertical_basis.inner_product(m, m) * (1 + self.vertical_basis.eigvals[m]) * V_trial[self.index_map_alpha[m][l]] * V_test[self.index_map_alpha[m][l]] * ngsolve.dx
+                    V_inner_prod += self.vertical_basis.inner_product(m, m) * (1 + self.vertical_basis.eigvals[m]) * V_trial[self.index_map_beta[m][l]] * V_test[self.index_map_beta[m][l]] * ngsolve.dx
+                    
+                    V_inner_prod += self.vertical_basis.inner_product(m, m) * (ngsolve.grad(V_trial[self.index_map_alpha[m][l]]) * ngsolve.grad(V_test[self.index_map_alpha[m][l]])) * ngsolve.dx
+                    V_inner_prod += self.vertical_basis.inner_product(m, m) * (ngsolve.grad(V_trial[self.index_map_beta[m][l]]) * ngsolve.grad(V_test[self.index_map_beta[m][l]])) * ngsolve.dx
+                    
+                    for n in range(self.numerical_information['M']):
+                        V_inner_prod += -self.constant_physical_parameters['sf'] / self.constant_physical_parameters['Av'] * \
+                              self.vertical_basis.evaluation_function(-1, n) * self.vertical_basis.evaluation_function(-1, m) * \
+                              V_trial[self.index_map_alpha[n][l]] * V_test[self.index_map_alpha[m][l]] * ngsolve.dx
+                        V_inner_prod += -self.constant_physical_parameters['sf'] / self.constant_physical_parameters['Av'] * \
+                              self.vertical_basis.evaluation_function(-1, n) * self.vertical_basis.evaluation_function(-1, m) * \
+                              V_trial[self.index_map_beta[n][l]] * V_test[self.index_map_beta[m][l]] * ngsolve.dx
+
+        V_inner_prod.Assemble()
+
+        V_freedofs = get_freedof_list(self.Vprod.FreeDofs())
+
+        Q_trial, Q_test = self.Qprod.TnT()
+        Q_inner_prod = ngsolve.BilinearForm(self.Qprod)
+        Q_inner_prod += sum(trial * test * ngsolve.dx for trial, test in zip(Q_trial, Q_test))
+        Q_inner_prod.Assemble()
+        
+        Q_freedofs = get_freedof_list(self.Qprod.FreeDofs())
+
+        # Make them scipy sparse matrices
+        MV = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(V_inner_prod.mat), V_freedofs).tocsc()
+        MQ = remove_fixeddofs_from_csr(basematrix_to_csr_matrix(Q_inner_prod.mat), Q_freedofs)
+
+        
+        A = B @ splin.spsolve(MV, Bt)
+        print("Finished setting up generalised eigenvalue problem; proceeding to solve.")
+        eig, converged = solve_generalised_eigenvalue_problem(MQ, A, maxits=maxits, eps=eps,**kwargs)
+
+        return np.sqrt(abs(1 / eig)), converged
+    
+
+    def evaluate_coercivity_condition(self, tri_refinement_level):
+        """Currently only works for triangular meshes"""
+
+        H = self.spatial_parameters['H']
+        Hx = self.spatial_parameters_grad['H'][0] / self.geometric_information['x_scaling']
+        Hy = self.spatial_parameters_grad['H'][1] / self.geometric_information['y_scaling']
+
+        eval_Hx = evaluate_on_tri_mesh(Hx, self.mesh, tri_refinement_level)
+        eval_Hy = evaluate_on_tri_mesh(Hy, self.mesh, tri_refinement_level)
+        eval_H = evaluate_on_tri_mesh(H, self.mesh, tri_refinement_level)
+
+        Hmin = np.amin(eval_H)
+        L = self.geometric_information['shape_parameters'][0]
+        lambda_min = self.vertical_basis.eigvals[0]
+        Av0, Ah = self.constant_physical_parameters['Av'], self.constant_physical_parameters['Ah']
+
+        lhs = np.sqrt(np.amax(eval_Hx)**2 + np.amax(eval_Hy)**2)
+        rhs = min(2*Hmin/L, lambda_min * Av0 * L / Ah, Av0 * L / Ah)
+        return lhs < rhs, abs(lhs - rhs)
+    
+
+    def add_manufactured_rhs(self, manufactured_rhs: dict):
+        """Adds the right-hand side associated to a manufactured solution to the weak formulation. Needs to be computed beforehand."""
+        fourier_indices = constituent_indices_to_fourier_indices(self.numerical_information['constituent_indices'])
+        for l in fourier_indices:
+            self.total_bilinearform += manufactured_rhs['DIC'][l] * self.DIC_testfunctions[l] * ngsolve.dx
+            for p in range(self.numerical_information['M']):
+                self.total_bilinearform += manufactured_rhs['umom'][p][l] * self.umom_testfunctions[p][l] * ngsolve.dx
+                self.total_bilinearform += manufactured_rhs['vmom'][p][l] * self.vmom_testfunctions[p][l] * ngsolve.dx
+
+
 
 
     def save(self, name: str, solution_format='npy'):
@@ -653,7 +790,11 @@ def load_hydrodynamics(name, solution_format='npy', parent_hydro=None, forcing_i
 
     with open(f"{name}/constant_physical_parameters.json", 'rb') as params_file:
         constant_physical_parameters = json.load(params_file)
-
+        if isinstance(constant_physical_parameters['seaward_amplitudes'], str):
+            constant_physical_parameters['seaward_amplitudes'] = [0]
+        if isinstance(constant_physical_parameters['seaward_phases'], str):
+            constant_physical_parameters['seaward_phases'] = [0]
+            
     spatial_parameters = {}
     for param in os.listdir(f'{name}/spatial_parameters'):
         filename = os.fsdecode(param)
@@ -739,6 +880,7 @@ class DecomposedHydrodynamics(Hydrodynamics):
     
 
     def merge_depth_and_residual_setup(self):
+        """Add residual surface elevation to bathymetry."""
         self.spatial_parameters['H'] += self.forcing_gamma[0][0]
         self.spatial_parameters_grad = get_spatial_parameter_gradients(self.spatial_parameters, self.mesh)
         self.forcing_gamma[0][0] = ngsolve.CF(0)

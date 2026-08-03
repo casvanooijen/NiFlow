@@ -306,6 +306,7 @@ def eigbasis_partialslip(M: int, sf: float, Av: float, boundary_epsilon=1e-6, **
     
     basis = TruncationBasis(f_ps, inner_product=inner_prod_ps, derivative_evaluation_function=fprime_ps, second_derivative_evaluation_function=fdoubleprime_ps)
     basis.integrated_evaluation_function = fint_ps
+    basis.eigvals = root_eigvals**2
 
 
     def analytical_G1(m, n, k):

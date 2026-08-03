@@ -3,6 +3,10 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 import ngsolve
 import scipy.sparse as sp
+import scipy.sparse.linalg as splin
+import pypardiso
+from copy import *
+from NiFlow.truncationbasis.integrationtools import *
 
 
 def mesh_to_coordinate_array(mesh):
@@ -80,9 +84,6 @@ def refine_mesh_by_elemental_integration(mesh: ngsolve.Mesh, cf: ngsolve.Coeffic
     # compute average integral val
     avg = (1/mesh.ne) * sum([integralvals[el.nr]**p for el in mesh.Elements()])
 
-
-    # print(avg)
-
     for el in mesh.Elements():
         if integralvals[el.nr]**(p) > K * avg:
             counter += 1
@@ -148,6 +149,14 @@ def evaluate_CF_range(cf, mesh, x, y):
     
     """
     return cf(mesh(x, y)).flatten()
+
+
+def evaluate_on_tri_mesh(cf, mesh, refinement_level=1):
+    """Evaluate Coefficient function on a triangular mesh."""
+    triangulation = get_triangulation(mesh.ngmesh)
+    refiner = tri.UniformTriRefiner(triangulation)
+    refined_triangulation = refiner.refine_triangulation(subdiv=refinement_level)
+    return evaluate_CF_range(cf, mesh, refined_triangulation.x, refined_triangulation.y)
 
 
 def plot_CF_colormap(cf, mesh, refinement_level=1, show_mesh=False, title='Gridfunction', save=None, **kwargs):
@@ -468,7 +477,7 @@ def take_second_derivative(gf:ngsolve.GridFunction, fespace: ngsolve.FESpace, di
         raise ValueError("Invalid direction specified. Use either 0 (x) or 1 (y).")
 
     first_derivative = ngsolve.GridFunction(fespace)
-    first_derivative.Set(ngsolve.grad(gf)[direction])
+    first_derivative.Interpolate(ngsolve.grad(gf)[direction])
     return ngsolve.grad(first_derivative)[direction]
 
 
@@ -485,6 +494,7 @@ def CF_times_arr(cf: ngsolve.CoefficientFunction, arr: np.ndarray):
         result[k] = cf * flat_arr[k]
     return result.reshape(arr.shape)
 
+
 def cosh_of_arr(arr: np.ndarray):
     if not isinstance(arr, np.ndarray):
         try:
@@ -500,16 +510,98 @@ def cosh_of_arr(arr: np.ndarray):
 
 
 def L2err_vector_gridfunction(gf1, gf2, mesh):
+    """Compute product norm error in L^2"""
     error_squared = 0
     for component1, component2 in zip(gf1.components, gf2.components):
         error_squared += ngsolve.Integrate((component1 - component2)**2, mesh)
     return ngsolve.sqrt(error_squared)
 
 
+def L2norm_2D(field, mesh, intorder=10):
+    """field is an ngsolve.CoefficientFunction."""
+    return ngsolve.sqrt(ngsolve.Integrate(field**2, mesh, order=intorder))
+
+
+def H1norm_2D(field, field_x, field_y, mesh, x_gradient_scalefactor=1, y_gradient_scalefactor=1, intorder=10):
+    """Return H1-norm of a CoefficientFunction, given x- and y-gradients and derivative scaling factors."""
+    return ngsolve.sqrt(ngsolve.Integrate(field**2 + x_gradient_scalefactor**2 * field_x**2 + y_gradient_scalefactor**2 * field_y**2, mesh, order=intorder))
+
+
+def L2norm_3D(field, mesh, intorder=10, num_vertical_integration_points=21):
+    """field is a lambda function of the following form. field = lambda sig: ngsolve.CoefficientFunction (depending on sig)."""
+
+    GLL_points = get_GLL_points(num_vertical_integration_points)
+    integration_points = map_GLL_points(GLL_points, -1, 0)
+    values = []
+    for point in integration_points:
+        values.append(field(point)**2)
+
+    vertically_integrated_field_sq = GLL_integrate(values, GLL_points, xl=-1, xr=0)
+    return ngsolve.sqrt(ngsolve.Integrate(vertically_integrated_field_sq, mesh, order=intorder))
+
+
+def H1norm_3D(field, field_x, field_y, vertically_differentiated_field, mesh, intorder, num_vertical_integration_points=21, x_gradient_scalefactor=1, y_gradient_scalefactor=1):
+    """field is a lambda function of the following form. field = lambda sig: ngsolve.CoefficientFunction (depending on sig), and vertically_differentiated_field is
+    the partial derivative w.r.t. sig of that field."""
+
+    L2_norm = L2norm_3D(field, mesh, intorder=intorder, num_vertical_integration_points=num_vertical_integration_points)
+
+    GLL_points = get_GLL_points(num_vertical_integration_points)
+    integration_points = map_GLL_points(GLL_points, -1, 0)
+    values = []
+    for point in integration_points:
+        values.append(vertically_differentiated_field(point)**2 + x_gradient_scalefactor**2 * field_x(point)**2 + y_gradient_scalefactor**2 * field_y(point)**2)
+    
+    vertically_integrated_diff_field_sq = GLL_integrate(values, GLL_points, xl=-1, xr=0)
+    return ngsolve.sqrt(L2_norm**2 + ngsolve.Integrate(vertically_integrated_diff_field_sq, mesh, order=intorder))
+
+
 def constituent_indices_to_fourier_indices(time_indices):
+    """Maps a list of constituent indices e.g. [0, 1, 3] to the list of Fourier indices [0, 1, -1, 3, -3]"""
     fourier_indices = []
     for i in time_indices:
         fourier_indices.append(i)
         if i != 0:
             fourier_indices.append(-i)
     return fourier_indices
+
+
+def get_nodes_associated_to_boundary_condition(mesh: ngsolve.Mesh, bc_name: str):
+    node_ids = []
+    for el in mesh.Elements(ngsolve.BND):
+        if el.mat == bc_name:
+            node_ids.append(el.elementnode)
+    return node_ids
+
+
+def plot_contoured_pixel_image(x_axis, y_axis, data, title=None, xlabel=None, ylabel=None, clabel=None, x_stride=2, y_stride=2, num_contourlevels=5, contourdata=None, contourcolor='white', figsize=(3, 3), **kwargs):
+    """Plot a figure using matplotlib.pyplot.imshow, including contours based on a possibly different variable."""
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(data, origin='lower', aspect='auto', extent=[x_axis.min(), x_axis.max(), y_axis.min(), y_axis.max()], **kwargs)
+    ax.set_xticks(x_axis[::x_stride])
+    ax.set_yticks(y_axis[::y_stride])
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    
+    if contourdata is None:
+        contourdata = data
+
+    X, Y = np.meshgrid(x_axis, y_axis)
+    contours = ax.contour(
+    X, Y, contourdata,
+    levels=num_contourlevels,           
+    colors=contourcolor,
+    linewidths=1
+    )
+
+    ax.clabel(contours, inline=True, fontsize=8)
+
+    cbar = fig.colorbar(im, ax = ax)
+    cbar.ax.set_ylabel(clabel)
+
+    fig.tight_layout()
+
+
+
+

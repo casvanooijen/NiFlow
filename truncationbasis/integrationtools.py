@@ -36,7 +36,7 @@ def GLL_integrate(values, points, xl=-1, xr=1):
     - xl:           left integration boundary;
     - xr:           right integration boundary;"""
 
-    num_points = values.shape[0]
+    num_points = values.shape[0] if isinstance(values, np.ndarray) else len(values)
     #Legendre_pol = JacobiPolynomials.Jacobi_polynomial(0, 0, num_points - 1)
 
     weights = [2 / (num_points*(num_points-1)*scipy.special.eval_legendre(num_points - 1, points[i])*scipy.special.eval_legendre(num_points - 1, points[i])) \

@@ -117,6 +117,9 @@ class PostProcessing(object):
         self.v = lambda q, sigma : sum([hydro.beta_solution[m][q] * hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)])
         self.gamma = lambda q : hydro.gamma_solution[q]
 
+        self.u_DA = lambda q: sum(hydro.vertical_basis.tensor_dict['G4'](m) * hydro.alpha_solution[m][q] for m in range(self.M))
+        self.v_DA = lambda q: sum(hydro.vertical_basis.tensor_dict['G4'](m) * hydro.beta_solution[m][q] for m in range(self.M))
+
         self.u_timed = lambda t, sigma: sum([sum([(hydro.alpha_solution[m][q]+Q[q]*self.river_interpolant) * hydro.vertical_basis.evaluation_function(sigma, m) * hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices])
         self.v_timed = lambda t, sigma: sum([sum([hydro.beta_solution[m][q] * hydro.vertical_basis.evaluation_function(sigma, m) * hydro.time_basis.evaluation_function(t, q) for m in range(self.M)]) for q in self.fourier_indices])
         self.zeta_timed = lambda t: sum([self.hydro.gamma_solution[l] * self.hydro.time_basis.evaluation_function(t, l) for l in self.fourier_indices])
@@ -162,10 +165,14 @@ class PostProcessing(object):
         self.ux = lambda q, sigma : sum([(ngsolve.grad(self.hydro.alpha_solution[m][q])[0] + Q[q]*self.river_interpolant_x)* self.hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)]) / self.x_scaling
         self.vx = lambda q, sigma : sum([ngsolve.grad(self.hydro.beta_solution[m][q])[0] * self.hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)]) / self.x_scaling
         self.gammax = lambda q: ngsolve.grad(self.hydro.gamma_solution[q])[0] / self.x_scaling
+        self.u_DA_x = lambda q: sum(self.hydro.vertical_basis.tensor_dict['G4'](m) * ngsolve.grad(self.hydro.alpha_solution[m][q])[0] for m in range(self.M)) / self.x_scaling
+        self.v_DA_x = lambda q: sum(self.hydro.vertical_basis.tensor_dict['G4'](m) * ngsolve.grad(self.hydro.beta_solution[m][q])[0] for m in range(self.M)) / self.x_scaling
 
         self.uy = lambda q, sigma : sum([ngsolve.grad(self.hydro.alpha_solution[m][q])[1] * self.hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)]) / self.y_scaling 
         self.vy = lambda q, sigma : sum([ngsolve.grad(self.hydro.beta_solution[m][q])[1] * self.hydro.vertical_basis.evaluation_function(sigma, m) for m in range(self.M)]) / self.y_scaling
         self.gammay = lambda q: ngsolve.grad(self.hydro.gamma_solution[q])[1] / self.y_scaling
+        self.u_DA_y = lambda q: sum(self.hydro.vertical_basis.tensor_dict['G4'](m) * ngsolve.grad(self.hydro.alpha_solution[m][q])[1] for m in range(self.M)) / self.y_scaling
+        self.v_DA_y = lambda q: sum(self.hydro.vertical_basis.tensor_dict['G4'](m) * ngsolve.grad(self.hydro.beta_solution[m][q])[1] for m in range(self.M)) / self.y_scaling
 
         self.usig = lambda q, sigma : sum([(self.hydro.alpha_solution[m][q] + Q[q]*self.river_interpolant)* self.hydro.vertical_basis.derivative_evaluation_function(sigma, m) for m in range(self.M)])
         self.vsig = lambda q, sigma : sum([self.hydro.beta_solution[m][q] * self.hydro.vertical_basis.derivative_evaluation_function(sigma, m) for m in range(self.M)]) #same
@@ -413,6 +420,86 @@ class PostProcessing(object):
             return transport
         
 
+    def L2err3D(self, target_u, target_v, target_z, intorder=10, surface_scalefactor=1, velocity_scalefactor=1):
+        errors_u = {}
+        errors_v = {}
+        errors_uvec = {}
+        errors_z = {}
+        product_norm_errors = {}
+        for l in self.fourier_indices:
+            errors_u[l] = velocity_scalefactor * L2norm_3D(lambda sig: self.u(l, sig) - target_u[l](sig), self.hydro.mesh, intorder)
+            errors_v[l] = velocity_scalefactor * L2norm_3D(lambda sig: self.v(l, sig) - target_v[l](sig), self.hydro.mesh, intorder)
+            errors_z[l] = surface_scalefactor * L2norm_2D(self.hydro.gamma_solution[l] - target_z[l], self.hydro.mesh, intorder)
+
+            errors_uvec[l] = np.sqrt(errors_u[l]**2 + errors_v[l]**2)
+
+        product_norm_errors['u'] = np.sqrt(sum(errors_u[l]**2 for l in self.fourier_indices))
+        product_norm_errors['v'] = np.sqrt(sum(errors_v[l]**2 for l in self.fourier_indices))
+        product_norm_errors['z'] = np.sqrt(sum(errors_z[l]**2 for l in self.fourier_indices))
+        product_norm_errors['uvec'] = np.sqrt(sum(errors_uvec[l]**2 for l in self.fourier_indices))
+
+        return errors_u, errors_v, errors_z, errors_uvec, product_norm_errors
+    
+
+    def H1err3D(self, target_u, target_v, target_z, target_ux, target_uy, target_usig, target_vx, target_vy, target_vsig, intorder=10, 
+                surface_scalefactor=1, velocity_scalefactor=1, x_gradient_scalefactor=1, y_gradient_scalefactor=1):
+        errors_u = {}
+        errors_v = {}
+        errors_uvec = {}
+        errors_z = {}
+        product_norm_errors = {}
+        for l in self.fourier_indices:
+            errors_u[l] = velocity_scalefactor * H1norm_3D(lambda sig: self.u(l, sig) - target_u[l](sig), 
+                                    lambda sig: (self.ux(l, sig)*self.x_scaling - target_ux[l](sig)),
+                                    lambda sig: (self.uy(l, sig)*self.y_scaling - target_uy[l](sig)),
+                                    lambda sig: self.usig(l, sig) - target_usig[l](sig) ,self.hydro.mesh, intorder, x_gradient_scalefactor=x_gradient_scalefactor, y_gradient_scalefactor=y_gradient_scalefactor)
+            errors_v[l] = velocity_scalefactor * H1norm_3D(lambda sig: self.v(l, sig) - target_v[l](sig), 
+                                    lambda sig: (self.vx(l, sig)*self.x_scaling - target_vx[l](sig)),
+                                    lambda sig: (self.vy(l, sig)*self.y_scaling - target_vy[l](sig)),
+                                    lambda sig: self.vsig(l, sig) - target_vsig[l](sig) ,self.hydro.mesh, intorder, x_gradient_scalefactor=x_gradient_scalefactor, y_gradient_scalefactor=y_gradient_scalefactor)
+            errors_z[l] = surface_scalefactor * L2norm_2D(self.hydro.gamma_solution[l] - target_z[l], self.hydro.mesh, intorder)
+
+            errors_uvec[l] = np.sqrt(errors_u[l]**2 + errors_v[l]**2)
+
+        product_norm_errors['u'] = np.sqrt(sum(errors_u[l]**2 for l in self.fourier_indices))
+        product_norm_errors['v'] = np.sqrt(sum(errors_v[l]**2 for l in self.fourier_indices))
+        product_norm_errors['z'] = np.sqrt(sum(errors_z[l]**2 for l in self.fourier_indices))
+        product_norm_errors['uvec'] = np.sqrt(sum(errors_uvec[l]**2 for l in self.fourier_indices))
+
+        return errors_u, errors_v, errors_z, errors_uvec, product_norm_errors
+    
+
+    def H1err2D(self, target_u, target_v, target_ux, target_uy, target_vx, target_vy, 
+                intorder=10, velocity_scalefactor=1, x_gradient_scalefactor=1, y_gradient_scalefactor=1):
+        """Computes error between depth-averaged velocities"""
+        errors_u = {}
+        errors_v = {}
+        errors_uvec = {}
+
+        for l in self.fourier_indices:
+            errors_u[l] = velocity_scalefactor * H1norm_2D(self.u_DA(l) - target_u[l], self.u_DA_x(l)*self.x_scaling - target_ux[l], self.u_DA_y(l)*self.y_scaling - target_uy[l], self.hydro.mesh, x_gradient_scalefactor, y_gradient_scalefactor, intorder)
+            errors_v[l] = velocity_scalefactor * H1norm_2D(self.v_DA(l) - target_v[l], self.v_DA_x(l)*self.x_scaling - target_vx[l], self.v_DA_y(l)*self.y_scaling - target_vy[l], self.hydro.mesh, x_gradient_scalefactor, y_gradient_scalefactor, intorder)
+            errors_uvec[l] = np.sqrt(errors_u[l]**2 + errors_v[l]**2)
+
+        product_norm_error = np.sqrt(sum(errors_uvec[l]**2 for l in self.fourier_indices))
+        return errors_u, errors_v, errors_uvec, product_norm_error
+
+
+    def L2err2D(self, target_u, target_v, intorder=10, velocity_scalefactor=1, x_gradient_scalefactor=1, y_gradient_scalefactor=1):
+        """Computes error between depth-averaged velocities"""
+        errors_u = {}
+        errors_v = {}
+        errors_uvec = {}
+
+        for l in self.fourier_indices:
+            errors_u[l] = velocity_scalefactor * L2norm_2D(self.u_DA(l) - target_u[l], self.hydro.mesh, intorder)
+            errors_v[l] = velocity_scalefactor * L2norm_2D(self.v_DA(l) - target_v[l], self.hydro.mesh, intorder)
+            errors_uvec[l] = np.sqrt(errors_u[l]**2 + errors_v[l]**2)
+
+        product_norm_error = np.sqrt(sum(errors_uvec[l]**2 for l in self.fourier_indices))
+        return errors_u, errors_v, errors_uvec, product_norm_error
+    
+
     def exchange_rate(self, num_vertical_points=100, quantity='u0'):
         """Computes the integral of max(u_subtidal, 0) over the entire domain. The dimension of this quantity is m^4/s.
         
@@ -481,7 +568,10 @@ class HydroPlot(object):
 
     # Fundamental plotting functions
 
-    def add_topview_plot(self, title, exclude_ramping_zone=True, colormap_quantity=None, cmap='RdBu', center_range=True, clabel='Color [unit]', contours=True, refinement_level=3, vectorfield_quantity=None, num_arrows:tuple=(30,30), arrow_color='k', length_indication='alpha', xlim=(None, None), ylim=(None, None), **kwargs):
+    def add_topview_plot(self, title, exclude_ramping_zone=True, colormap_quantity=None, cmap='RdBu', center_range=True, clabel='Color [unit]', 
+                         contours=True, contourlabels=True, refinement_level=3, vectorfield_quantity=None, num_arrows:tuple=(30,30), 
+                         arrow_color='k', length_indication='alpha', xlim=(None, None), ylim=(None, None), cbar=True, 
+                         xticklabels=True, yticklabels=True, nticks_x=11, nticks_y=5, **kwargs):
         x_scaling = self.hydro.geometric_information['x_scaling']
         y_scaling = self.hydro.geometric_information['y_scaling']
         
@@ -517,7 +607,8 @@ class HydroPlot(object):
                     try:
                         levels = np.linspace(np.min(eval_gfu), np.max(eval_gfu), 10*(3))
                         contour = current_ax.tricontour(refined_triangulation, eval_gfu, levels, colors=['k'] + ["0.4"] * 2, linewidths=[.5] * (3))
-                        current_ax.clabel(contour, levels[0::3], inline=1, fontsize=10, fmt='%1.4f')
+                        if contourlabels:
+                            current_ax.clabel(contour, levels[0::3], inline=1, fontsize=10, fmt='%1.2f')
                     except ValueError:
                         print("Constant solution; plotting contour lines impossible")
 
@@ -544,7 +635,7 @@ class HydroPlot(object):
                     colormesh = current_ax.pcolormesh(X, Y, Q, cmap=cmap, **kwargs)
                 
                 if contours:
-                    num_levels = 10
+                    num_levels = 6
                     subamplitude_lines = 2
                     try:
                         levels = np.linspace(np.min(Q.flatten()), np.max(Q.flatten()), num_levels*(subamplitude_lines+1))
@@ -553,9 +644,9 @@ class HydroPlot(object):
                     except ValueError:
                         print("Constant solution; plotting contour lines impossible")
 
-            
-            cbar = self.fig.colorbar(colormesh, ax = current_ax)
-            cbar.ax.set_ylabel(clabel)
+            if cbar:
+                cbar = self.fig.colorbar(colormesh, ax = current_ax)
+                cbar.ax.set_ylabel(clabel)
         
         if vectorfield_quantity is not None:
             if exclude_ramping_zone:
@@ -591,26 +682,30 @@ class HydroPlot(object):
 
 
         if exclude_ramping_zone:
-            x_ticks = list(np.linspace(0, 1, 11)) # Also a temporary solution; more domain types and compatibility with these functions will be added in the future
+            x_ticks = list(np.linspace(0, 1, nticks_x)) # Also a temporary solution; more domain types and compatibility with these functions will be added in the future
         else:
             x_ticks = list(np.linspace((-self.hydro.geometric_information['L_BL_sea']-self.hydro.geometric_information['L_R_sea']-self.hydro.geometric_information['L_RA_sea'])/x_scaling,
                                 (self.hydro.geometric_information['riverine_boundary_x']+self.hydro.geometric_information['L_RA_river']+self.hydro.geometric_information['L_R_river'] + self.hydro.geometric_information['L_BL_river'])/x_scaling,
                                 11))
-        y_ticks = list(np.linspace(-0.5, 0.5, 5))
+        y_ticks = list(np.linspace(-0.5, 0.5, nticks_y))
         current_ax.set_xticks(x_ticks)
         current_ax.set_yticks(y_ticks)
-        current_ax.set_xticklabels(np.round(np.array(x_ticks) * x_scaling / 1e3, 1))
-        current_ax.set_yticklabels(np.round(np.array(y_ticks) * y_scaling / 1e3, 1))
+        current_ax.set_xticklabels(np.round(np.array(x_ticks) * x_scaling / 1e3, 1) if xticklabels else ["" for _ in x_ticks])
+        current_ax.set_yticklabels(np.round(np.array(y_ticks) * y_scaling / 1e3, 1) if yticklabels else ["" for _ in y_ticks])
 
-        current_ax.set_xlabel('x [km]')
-        current_ax.set_ylabel('y [km]')
+        current_ax.set_xlabel('x [km]' if xticklabels else None)
+        current_ax.set_ylabel('y [km]' if yticklabels else None)
 
         current_ax.set_xlim(xlim[0], xlim[1])
         current_ax.set_ylim(ylim[0], ylim[1])
         self.plot_counter += 1
 
 
-    def add_cross_section_plot(self, title, x, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', spacing='equal', xlim=(None, None), ylim=(None, None), **kwargs):
+    def add_cross_section_plot(self, title, x, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, 
+                               clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, contourlabels=True, 
+                               vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', 
+                               spacing='equal', xlim=(None, None), ylim=(None, None), cbar=True, 
+                               xticklabels=True, yticklabels=True, nticks_x=11, **kwargs):
         if self.num_figures == (1, 1):
             current_ax = self.ax
         elif self.num_figures[0] == 1 or self.num_figures[1] == 1:
@@ -656,16 +751,19 @@ class HydroPlot(object):
                 color_crosssection = current_ax.pcolormesh(s_grid, z_grid, Q, vmin=-maxamp, vmax=maxamp, cmap=cmap, **kwargs)
             else:
                 color_crosssection = current_ax.pcolormesh(s_grid, z_grid, Q, cmap=cmap, **kwargs)
-            cbar_crosssection = plt.colorbar(color_crosssection, ax=current_ax)
-            cbar_crosssection.ax.set_ylabel(clabel)
+
+            if cbar:
+                cbar_crosssection = plt.colorbar(color_crosssection, ax=current_ax)
+                cbar_crosssection.ax.set_ylabel(clabel)
 
             if contours:
-                num_levels = 10
+                num_levels = 6
                 subamplitude_lines = 2
 
                 levels = np.linspace(np.min(Q), np.max(Q), num_levels*(subamplitude_lines+1))
                 contour = current_ax.contour(s_grid, z_grid, Q, levels, colors=['k'] + ["0.4"] * subamplitude_lines, linewidths=[.5] * (1+subamplitude_lines))
-                current_ax.clabel(contour, levels[0::subamplitude_lines+1], inline=1, fontsize=10, fmt='%1.4f')
+                if contourlabels:
+                    current_ax.clabel(contour, levels[0::subamplitude_lines+1], inline=1, fontsize=10, fmt='%1.2f')
                 
         if vectorfield_quantity_function is not None:
 
@@ -726,21 +824,31 @@ class HydroPlot(object):
             current_ax.set_title(f'{title}\nMaximum arrow magnitude = {np.format_float_scientific(np.amax(physical_norms),unique=False, precision=4)}')
         else:
             current_ax.set_title(title)
-        xticks = list(np.linspace(-0.5,0.5, 10))
+        xticks = list(np.linspace(-0.5,0.5, nticks_x))
         current_ax.set_xticks(xticks)
-        ticklabels = list(np.round(np.linspace(-0.5, 0.5, 10), 3) * y_scaling / 1000)
+        ticklabels = list(np.round(np.linspace(-0.5, 0.5, nticks_x), 3) * y_scaling / 1000)
         ticklabels_string = [str(np.round(tick, 3))[:4] if tick >= 0 else str(np.round(tick, 3))[:5] for tick in ticklabels]
+
+        if not xticklabels:
+            ticklabels_string = ["" for _ in xticks]
         current_ax.set_xticklabels(ticklabels_string)
+
+        if not yticklabels:
+            current_ax.set_yticklabels(["" for _ in current_ax.get_yticks()])
 
         current_ax.set_xlim(xlim[0], xlim[1])
         current_ax.set_ylim(ylim[0], ylim[1])
 
-        current_ax.set_xlabel('y [km]')
-        current_ax.set_ylabel('-Depth [m]')
+
+        current_ax.set_xlabel('y [km]' if xticklabels else None)
+        current_ax.set_ylabel('-Depth [m]' if yticklabels else None)
         self.plot_counter += 1
 
 
-    def add_2DV_plot(self, title, y, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', cmap='RdBu', center_range=True, contours=False, vectorfield_quantity_function=None, stride=5, length_indication='alpha', arrow_color='black', spacing='equal', xlim=(None, None), ylim=(None, None), **kwargs):
+    def add_2DV_plot(self, title, y, num_horizontal_points = 500, num_vertical_points = 500, colormap_quantity_function=None, clabel='Color [unit]', 
+                     cmap='RdBu', center_range=True, contours=False, contourlabels=True, vectorfield_quantity_function=None, stride=5, 
+                     length_indication='alpha', arrow_color='black', spacing='equal', xlim=(None, None), ylim=(None, None), cbar=True, 
+                     xticklabels=True, yticklabels=True, nticks_x=11, **kwargs):
         if self.num_figures == (1, 1):
             current_ax = self.ax
         elif self.num_figures[0] == 1 or self.num_figures[1] == 1:
@@ -784,16 +892,19 @@ class HydroPlot(object):
                 color_crosssection = current_ax.pcolormesh(s_grid, z_grid, Q, vmin=-maxamp, vmax=maxamp, cmap=cmap, **kwargs)
             else:
                 color_crosssection = current_ax.pcolormesh(s_grid, z_grid, Q, cmap=cmap, **kwargs)
-            cbar_crosssection = plt.colorbar(color_crosssection, ax=current_ax)
-            cbar_crosssection.ax.set_ylabel(clabel)
+
+            if cbar:
+                cbar_crosssection = plt.colorbar(color_crosssection, ax=current_ax)
+                cbar_crosssection.ax.set_ylabel(clabel)
 
             if contours:
-                num_levels = 10
+                num_levels = 6
                 subamplitude_lines = 2
 
                 levels = np.linspace(np.min(Q), np.max(Q), num_levels*(subamplitude_lines+1))
                 contour = current_ax.contour(s_grid, z_grid, Q, levels, colors=['k'] + ["0.4"] * subamplitude_lines, linewidths=[.5] * (1+subamplitude_lines))
-                current_ax.clabel(contour, levels[0::subamplitude_lines+1], inline=1, fontsize=10, fmt='%1.4f')
+                if contourlabels:
+                    current_ax.clabel(contour, levels[0::subamplitude_lines+1], inline=1, fontsize=10, fmt='%1.2f')
                 
 
         if vectorfield_quantity_function is not None:
@@ -854,17 +965,23 @@ class HydroPlot(object):
             current_ax.set_title(f'{title}\nMaximum arrow magnitude = {np.format_float_scientific(np.amax(physical_norms),unique=False, precision=4)}')
         else:
             current_ax.set_title(title)
-        xticks = list(np.linspace(0, 1, 10))
+        xticks = list(np.linspace(0, 1, nticks_x))
         current_ax.set_xticks(xticks)
-        ticklabels = list(np.round(np.linspace(0, 1, 10), 3) * x_scaling / 1000)
+        ticklabels = list(np.round(np.linspace(0, 1, nticks_x), 3) * x_scaling / 1000)
         ticklabels_string = [str(np.round(tick, 3))[:4] if tick >= 0 else str(np.round(tick, 3))[:5] for tick in ticklabels]
+        if not xticklabels:
+            ticklabels_string = ["" for _ in xticks]
         current_ax.set_xticklabels(ticklabels_string)
+
+        if not yticklabels:
+            current_ax.set_yticklabels(["" for _ in current_ax.get_yticks()])
 
         current_ax.set_xlim(xlim[0], xlim[1])
         current_ax.set_ylim(ylim[0], ylim[1])
 
-        current_ax.set_xlabel('x [km]')
-        current_ax.set_ylabel('-Depth [m]')
+
+        current_ax.set_xlabel('x [km]' if xticklabels else None)
+        current_ax.set_ylabel('-Depth [m]' if yticklabels else None)
         self.plot_counter += 1
         
 
